@@ -1,0 +1,44 @@
+# Gradle files
+.gradle/
+build/
+
+# Local configuration files
+/.kotlin
+local.properties
+
+# Android Studio and IntelliJ IDEA files
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# Keystore files
+/keystore.properties
+*.jks
+*.keystore
+
+# Log files
+*.log
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Build directories
+**/build
+/app/release
+
+# Proguard configuration files
+proguard-rules.pro
+
+# Miscellaneous
+*.apk
+*.ap_
+*.dex
+*.class
+/captures
+
+# Android NDK
+.externalNativeBuild
+ndkBuild/
+.cxx

@@ -1,0 +1,134 @@
+package com.techphenom.usbipserver.server.protocol.usb
+
+import android.hardware.usb.UsbDeviceConnection
+import android.hardware.usb.UsbEndpoint
+import android.hardware.usb.UsbInterface
+import android.util.SparseArray
+import com.techphenom.usbipserver.server.AttachedDeviceContext
+import com.techphenom.usbipserver.server.protocol.utils.Logger
+
+class UsbControlHelper {
+    companion object {
+        private const val TAG = "UsbControlHelper"
+        private const val GET_DESCRIPTOR_REQUEST_TYPE = 0x80
+        private const val GET_DESCRIPTOR_REQUEST = 0x06
+
+        private const val GET_STATUS_REQUEST_TYPE = 0x82
+        private const val GET_STATUS_REQUEST = 0x00
+
+        private const val CLEAR_FEATURE_REQUEST_TYPE = 0x02
+        private const val CLEAR_FEATURE_REQUEST = 0x01
+
+        private const val SET_CONFIGURATION_REQUEST_TYPE: Int = 0x00
+        private const val SET_CONFIGURATION_REQUEST: Int = 0x9
+
+        private const val SET_INTERFACE_REQUEST_TYPE: Int = 0x01
+        private const val SET_INTERFACE_REQUEST: Int = 0xB
+
+        private const val FEATURE_VALUE_HALT = 0x00
+
+        private const val DEVICE_DESCRIPTOR_TYPE = 1
+
+        fun readDeviceDescriptor(devConn: UsbDeviceConnection): UsbDeviceDescriptor? {
+            val descriptorBuffer = ByteArray(UsbDeviceDescriptor.DESCRIPTOR_SIZE)
+            val res: Int = doControlTransfer(
+                devConn, GET_DESCRIPTOR_REQUEST_TYPE,
+                GET_DESCRIPTOR_REQUEST,
+                DEVICE_DESCRIPTOR_TYPE shl 8 or 0x00,  // Devices only have 1 descriptor
+                0, descriptorBuffer, descriptorBuffer.size, 0
+            )
+            return if (res != UsbDeviceDescriptor.DESCRIPTOR_SIZE) {
+                null
+            } else UsbDeviceDescriptor(descriptorBuffer)
+        }
+        fun handleInternalControlTransfer(
+            deviceContext: AttachedDeviceContext,
+            requestType: Int,
+            request: Int,
+            value: Int,
+            index: Int
+        ): Boolean {
+            // Mask out possible sign expansions
+            var requestType = requestType
+            var request = request
+            var value = value
+            var index = index
+            requestType = requestType and 0xFF
+            request = request and 0xFF
+            value = value and 0xFFFF
+            index = index and 0xFFFF
+
+            if (requestType == SET_CONFIGURATION_REQUEST_TYPE && request == SET_CONFIGURATION_REQUEST) {
+                Logger.i(TAG, "Handling SET_CONFIGURATION via Android API")
+
+                for (i in 0..<deviceContext.device.configurationCount) {
+                    val config = deviceContext.device.getConfiguration(i)
+                    if (config.id == value) {
+                        // If we have a current config, we need unclaim all interfaces to allow the
+                        // configuration change to work properly.
+                        if (deviceContext.activeConfiguration != null) {
+                            Logger.i(TAG, "Unclaiming all interfaces from old configuration: " + deviceContext.activeConfiguration!!.id)
+                            for (j in 0..<deviceContext.activeConfiguration!!.interfaceCount) {
+                                val iface: UsbInterface? = deviceContext.activeConfiguration!!.getInterface(j)
+                                deviceContext.devConn.releaseInterface(iface)
+                            }
+                        }
+
+                        if (!deviceContext.devConn.setConfiguration(config)) {
+                            // This can happen for certain types of devices where Android itself
+                            // has set the configuration for us. Let's just hope that whatever the
+                            // client wanted is also what Android selected :/
+                            Logger.e(TAG, "Failed to set configuration! Proceeding anyway!")
+                        }
+
+                        // This is now the active configuration
+                        deviceContext.activeConfiguration = config
+
+                        // Construct the cache of endpoint mappings
+                        deviceContext.activeConfigurationEndpointsByNumDir = SparseArray<UsbEndpoint>()
+                        for (j in 0..<deviceContext.activeConfiguration!!.interfaceCount) {
+                            val iface = deviceContext.activeConfiguration!!.getInterface(j)
+                            for (k in 0..<iface.endpointCount) {
+                                val endp = iface.getEndpoint(k)
+                                deviceContext.activeConfigurationEndpointsByNumDir?.put(
+                                    endp.direction or endp.endpointNumber,
+                                    endp
+                                )
+                            }
+                        }
+
+                        Logger.i(TAG,"Claiming all interfaces from new configuration: " + deviceContext.activeConfiguration!!.id)
+                        for (j in 0..<deviceContext.activeConfiguration!!.interfaceCount) {
+                            val iface = deviceContext.activeConfiguration!!.getInterface(j)
+                            if (!deviceContext.devConn.claimInterface(iface, true)) {
+                                Logger.e(TAG,"Unable to claim interface: ${iface.id}")
+                            }
+                        }
+                        return true
+                    }
+                }
+
+                Logger.e(TAG, "SET_CONFIGURATION specified invalid configuration: $value")
+            } else if (requestType == SET_INTERFACE_REQUEST_TYPE && request == SET_INTERFACE_REQUEST) {
+                Logger.i(TAG, "Handling SET_INTERFACE via Android API")
+
+                if (deviceContext.activeConfiguration != null) {
+                    for (i in 0..<deviceContext.activeConfiguration!!.interfaceCount) {
+                        val iface = deviceContext.activeConfiguration!!.getInterface(i)
+                        if (iface.id == index && iface.alternateSetting == value) {
+                            if (!deviceContext.devConn.setInterface(iface)) {
+                                Logger.e(TAG, "Unable to set interface: ${iface.id}")
+                            }
+                            return true
+                        }
+                    }
+                    Logger.e(TAG, "SET_INTERFACE specified invalid interface: $index, $value")
+                } else {
+                    Logger.e(TAG, "Attempted to use SET_INTERFACE before SET_CONFIGURATION!")
+                }
+            }
+
+            return false
+        }
+    }
+}
