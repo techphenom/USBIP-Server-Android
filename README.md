@@ -8,7 +8,7 @@ This application allows your Android device (including Android TV) to act as a U
 
 ## Important Notes
 
-*   This application is a work-in-progress that builds upon the work done by cgutman and his [USBIPServerForAndroid](#https://github.com/cgutman/USBIPServerForAndroid) project.
+*   This application is a work-in-progress that builds upon the work done by cgutman and his [USBIPServerForAndroid](https://github.com/cgutman/USBIPServerForAndroid) project.
 *   For now, USB webcams and mics will NOT work. I'm not handling isochronous transfers.
 *   Works only with clients running USBIP version 1.1.1
 *   For a complete list of devices I've tested, please checkout the [wiki](https://github.com/techphenom/usbip-server-android/wiki/Devices-Tested).
@@ -41,3 +41,9 @@ The application leverages the USB/IP protocol. The Android device runs the USB/I
     *   [Latest Release](https://github.com/techphenom/usbip-server-android/releases)
     *   Or, build the APK from the source code.
 2.  **Install the APK on your Android device**
+
+## Changes Made From Original Project
+*   Converted Java code to Kotlin
+*   Using Coroutines instead of Threads
+*   New UI and TV UI with Jetpack Compose
+*   90% of the server code is from the original project. I just renamed/reorganized and fixed some bugs.
