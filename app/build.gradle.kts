@@ -1,5 +1,6 @@
 import java.util.Properties
 import java.io.FileInputStream
+import java.util.Base64
 
 plugins {
     id("com.android.application")
@@ -30,18 +31,32 @@ android {
         }
     }
 
-    signingConfigs {
+    signingConfigs { // Load either from ENV or from keystore.properties file
         create("release") {
-             val keystorePropertiesFile = rootProject.file("keystore.properties")
-             val keystoreProperties = Properties()
-             if (keystorePropertiesFile.exists()) {
-                 keystoreProperties.load(FileInputStream(keystorePropertiesFile))
-             }
-
-             storeFile = file(keystoreProperties.getProperty("storeFile", "release_keystore.jks"))
-             storePassword = keystoreProperties.getProperty("storePassword", "")
-             keyAlias = keystoreProperties.getProperty("keyAlias", "")
-             keyPassword = keystoreProperties.getProperty("keyPassword", "")
+            val keystoreFile = System.getenv("SIGNING_KEY_BASE64")?.let {
+                val tempFile = File.createTempFile("keystore", ".jks")
+                tempFile.writeBytes(Base64.getDecoder().decode(it))
+                tempFile
+            }
+            val storePasswordEnv = System.getenv("KEYSTORE_PASSWORD")
+            val keyAliasEnv = System.getenv("KEY_ALIAS")
+            val keyPasswordEnv = System.getenv("KEY_PASSWORD")
+            if (keystoreFile != null && !storePasswordEnv.isNullOrEmpty() && !keyAliasEnv.isNullOrEmpty() && !keyPasswordEnv.isNullOrEmpty()) {
+                storeFile = keystoreFile
+                storePassword = storePasswordEnv
+                keyAlias = keyAliasEnv
+                keyPassword = keyPasswordEnv
+            } else {
+                val keystorePropertiesFile = rootProject.file("keystore.properties")
+                val keystoreProperties = Properties()
+                if (keystorePropertiesFile.exists()) {
+                    keystoreProperties.load(FileInputStream(keystorePropertiesFile))
+                    storeFile = file(keystoreProperties.getProperty("storeFile", "release_keystore.jks"))
+                    storePassword = keystoreProperties.getProperty("storePassword", "")
+                    keyAlias = keystoreProperties.getProperty("keyAlias", "")
+                    keyPassword = keystoreProperties.getProperty("keyPassword", "")
+                }
+            }
         }
     }
 

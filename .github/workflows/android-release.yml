@@ -1,0 +1,79 @@
+name: Android Release APK
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+
+jobs:
+  build-and-release:
+    name: Build and Release APK
+    runs-on: ubuntu-latest
+    if: "contains(github.event.head_commit.modified, 'app/build.gradle.kts')" # ask about this
+
+  steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup JDK
+      uses: actions/setup-java@v4
+      with:
+        java-version: '21'
+        distribution: 'temurin'
+        cache: 'gradle'
+
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
+
+    - name: Get Version
+      id: get_version
+      run: |
+        TAG_NAME=${GITHUB_REF#refs/tags/}
+        echo "TAG_NAME=${TAG_NAME}" >> $GITHUB_OUTPUT
+        # Assuming your versionName in build.gradle matches the tag (excluding 'v')
+        # If not, you might still want to extract from build.gradle for consistency,
+        # but the tag is the primary version identifier here.
+        VERSION_NAME_FROM_GRADLE=$(./gradlew -q :app:properties -Pandroid.quiet=true | grep "versionName:" | awk '{print $2}')
+        echo "VERSION_NAME_FROM_GRADLE=${VERSION_NAME_FROM_GRADLE}" >> $GITHUB_OUTPUT
+        echo "Release triggered by tag: $TAG_NAME"
+        echo "Version Name from Gradle: $VERSION_NAME_FROM_GRADLE"
+
+    - name: Grant execute permission
+      run: chmod +x ./gradlew
+
+    - name: Build Release APK
+      env:
+        SIGNING_KEY_BASE64: ${{ secrets.SIGNING_KEY_BASE64 }}
+        KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+      run: ./gradlew :app:assembleRelease --stacktrace
+
+    - name: Rename APK for release
+      id: rename_apk
+      run: |
+        APK_DIR="app/build/outputs/apk/release"
+        TAG_VERSION_NAME="${{ steps.get_version.outputs.TAG_NAME }}"
+        ORIGINAL_APK_NAME="app-release.apk" # Default name, adjust if yours is different
+        NEW_APK_NAME="USBIPServer-${TAG_VERSION_NAME}-release.apk" # Customize your app name
+        
+        if [ -f "${APK_DIR}/${ORIGINAL_APK_NAME}" ]; then
+          mv "${APK_DIR}/${ORIGINAL_APK_NAME}" "${APK_DIR}/${NEW_APK_NAME}"
+          echo "APK_PATH=${APK_DIR}/${NEW_APK_NAME}" >> $GITHUB_OUTPUT
+          echo "APK_NAME=${NEW_APK_NAME}" >> $GITHUB_OUTPUT
+          echo "Successfully renamed APK to ${NEW_APK_NAME}"
+        else
+          echo "Error: ${APK_DIR}/${ORIGINAL_APK_NAME} not found!"
+          exit 1
+        fi
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ steps.get_version.outputs.TAG_NAME }}
+        name: "Release ${{ steps.get_version.outputs.TAG_NAME }}"
+        generate_release_notes: true
+        draft: false
+        prerelease: ${{ contains(steps.get_version.outputs.TAG_NAME, '-alpha') || contains(steps.get_version.outputs.TAG_NAME, '-beta') || contains(steps.get_version.outputs.TAG_NAME, '-rc') }}
+        files: |
+          ${{ steps.rename_apk.outputs.APK_PATH }}
