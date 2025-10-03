@@ -45,8 +45,7 @@ fun USBDevice(
         Row (
             modifier = Modifier
                 .fillMaxWidth()
-                //.height(150.dp)
-                //.background(Color.LightGray)
+                .clickable { callback(deviceName) }
                 .padding(bottom = 8.dp, top = 8.dp)
         ) {
             Image(
@@ -55,10 +54,8 @@ fun USBDevice(
                 colorFilter = ColorFilter.tint(color),
                 modifier = Modifier
                     .size(100.dp)
-                    .clickable { callback(deviceName) }
             )
             Column(
-                //modifier = Modifier.fillMaxHeight(),
                 verticalArrangement = Arrangement.Center
             ) {
                 Text(text = "Name: $productName")

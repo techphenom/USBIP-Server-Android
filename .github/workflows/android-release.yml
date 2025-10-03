@@ -30,9 +30,6 @@ jobs:
         run: |
           TAG_NAME=${GITHUB_REF#refs/tags/}
           echo "TAG_NAME=${TAG_NAME}" >> $GITHUB_OUTPUT
-          # Assuming your versionName in build.gradle matches the tag (excluding 'v')
-          # If not, you might still want to extract from build.gradle for consistency,
-          # but the tag is the primary version identifier here.
           VERSION_NAME_FROM_GRADLE=$(./gradlew -q :app:properties -Pandroid.quiet=true | grep "versionName:" | awk '{print $2}')
           echo "VERSION_NAME_FROM_GRADLE=${VERSION_NAME_FROM_GRADLE}" >> $GITHUB_OUTPUT
           echo "Release triggered by tag: $TAG_NAME"
