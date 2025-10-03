@@ -22,7 +22,6 @@ import com.techphenom.usbipserver.UsbIpService
 import com.techphenom.usbipserver.data.UsbDeviceWithState
 import com.techphenom.usbipserver.data.UsbIpRepository
 import com.techphenom.usbipserver.server.UsbIpDeviceConstants.UsbIpDeviceState
-import com.techphenom.usbipserver.ui.theme.TvTypography
 import com.techphenom.usbipserver.ui.theme.USBOverIPTheme
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
@@ -168,7 +167,7 @@ class TvActivity : ComponentActivity() {
         repository.setUsbDevices(devices)
 
         setContent {
-            USBOverIPTheme(darkTheme = true, typography = TvTypography) {
+            USBOverIPTheme(darkTheme = true) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
