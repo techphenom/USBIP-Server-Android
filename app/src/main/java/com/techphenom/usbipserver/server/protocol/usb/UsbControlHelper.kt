@@ -1,5 +1,6 @@
 package com.techphenom.usbipserver.server.protocol.usb
 
+import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
@@ -25,14 +26,17 @@ class UsbControlHelper {
         private const val SET_INTERFACE_REQUEST_TYPE: Int = 0x01
         private const val SET_INTERFACE_REQUEST: Int = 0xB
 
+        private const val SET_ADDRESS_REQUEST_TYPE: Int = 0x00
+        private const val SET_ADDRESS_REQUEST: Int = 0x05
+
         private const val FEATURE_VALUE_HALT = 0x00
 
         private const val DEVICE_DESCRIPTOR_TYPE = 1
 
-        fun readDeviceDescriptor(devConn: UsbDeviceConnection): UsbDeviceDescriptor? {
+        fun readDeviceDescriptor(context: AttachedDeviceContext): UsbDeviceDescriptor? {
             val descriptorBuffer = ByteArray(UsbDeviceDescriptor.DESCRIPTOR_SIZE)
             val res: Int = doControlTransfer(
-                devConn, GET_DESCRIPTOR_REQUEST_TYPE,
+                context, GET_DESCRIPTOR_REQUEST_TYPE,
                 GET_DESCRIPTOR_REQUEST,
                 DEVICE_DESCRIPTOR_TYPE shl 8 or 0x00,  // Devices only have 1 descriptor
                 0, descriptorBuffer, descriptorBuffer.size, 0
@@ -48,16 +52,6 @@ class UsbControlHelper {
             value: Int,
             index: Int
         ): Boolean {
-            // Mask out possible sign expansions
-            var requestType = requestType
-            var request = request
-            var value = value
-            var index = index
-            requestType = requestType and 0xFF
-            request = request and 0xFF
-            value = value and 0xFFFF
-            index = index and 0xFFFF
-
             if (requestType == SET_CONFIGURATION_REQUEST_TYPE && request == SET_CONFIGURATION_REQUEST) {
                 Logger.i(TAG, "Handling SET_CONFIGURATION via Android API")
 

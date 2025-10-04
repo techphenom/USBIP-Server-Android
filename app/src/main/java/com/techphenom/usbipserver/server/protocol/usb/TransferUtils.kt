@@ -3,6 +3,7 @@ package com.techphenom.usbipserver.server.protocol.usb
 import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbEndpoint
+import com.techphenom.usbipserver.server.AttachedDeviceContext
 import com.techphenom.usbipserver.server.protocol.utils.Logger
 import kotlin.math.min
 import kotlin.collections.sliceArray
@@ -37,35 +38,39 @@ fun doBulkTransfer(
 }
 
 fun doControlTransfer(
-    devConn: UsbDeviceConnection,
+    context: AttachedDeviceContext,
     requestType: Int,
     request: Int,
     value: Int,
     index: Int,
     buff: ByteArray,
     length: Int,
-    interval: Int
+    timeout: Int
 ): Int {
-
     // Mask out possible sign expansions
     val _requestType = requestType and 0xFF
     val _request = request and 0xFF
     val _value = value and 0xFFFF
     val _index = index and 0xFFFF
     val _length = length and 0xFFFF
+    // We have to handle certain control requests (SET_CONFIGURATION/SET_INTERFACE) by calling
+    // Android APIs rather than just submitting the URB directly to the device
+    val res = if(!UsbControlHelper.handleInternalControlTransfer(context, _requestType, _request, _value, _index)) {
 
-    Logger.i(TAG,"doControlTransfer - SETUP: ${devConn.fileDescriptor} - $_requestType, $_request, $_value, $_index, $_length")
+        Logger.i(TAG,"doControlTransfer - SETUP: ${context.devConn.fileDescriptor} - $_requestType, $_request, $_value, $_index, $_length")
 
-    val res = UsbLib().doControlTransfer(
-        devConn.fileDescriptor,
-        _requestType.toByte(),
-        _request.toByte(),
-        _value.toShort(),
-        _index.toShort(),
-        buff,
-        _length,
-        interval
-    )
+        UsbLib().doControlTransfer(
+            context.devConn.fileDescriptor,
+            _requestType.toByte(),
+            _request.toByte(),
+            _value.toShort(),
+            _index.toShort(),
+            buff,
+            _length,
+            timeout
+        )
+    } else 0
+
     if (res < 0 && res != -110) { // Don't print for ETIMEDOUT
         Logger.e(TAG,"controlTransfer failed: $res")
     }
