@@ -463,9 +463,6 @@ class UsbIpServer(
                 val value = bb.getShort()
                 val index = bb.getShort()
                 val length = bb.getShort()
-                if (length.toInt() != 0 && requestType.toInt() and 0x80 != 0) {
-                    reply.inData = ByteArray(length.toInt())
-                }
 
                 res = doControlTransfer(
                     context,
@@ -473,7 +470,7 @@ class UsbIpServer(
                     request.toInt(),
                     value.toInt(),
                     index.toInt(),
-                    if (requestType.toInt() and 0x80 != 0) reply.inData else msg.outData,
+                    buff.array(),
                     length.toInt(),
                     300
                 )
