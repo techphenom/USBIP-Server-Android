@@ -33,6 +33,7 @@ import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -53,7 +54,7 @@ class UsbIpServer(
     private val runningJobs = ConcurrentHashMap<Socket, Job>()
     private var socketMap = HashMap<Socket, AttachedDeviceContext>()
     private lateinit var serverSocket: ServerSocket
-    private lateinit var serverWorker: Job
+    private lateinit var serverScope: CoroutineScope
 
     companion object {
         private const val FLAG_POSSIBLE_SPEED_LOW = 0x01
@@ -68,57 +69,63 @@ class UsbIpServer(
         val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
             Logger.e("start()" , "$throwable")
         }
-        serverWorker = CoroutineScope(Dispatchers.IO + exceptionHandler).launch {
-
+        CoroutineScope(Dispatchers.IO + exceptionHandler).launch {
             serverSocket = ServerSocket(USBIP_PORT)
 
             while (isActive) {
-                handleClientConnection(serverSocket.accept())
+                handleClientConnection(serverSocket.accept(), this)
             }
         }
     }
 
     fun stop() {
+        if (::serverScope.isInitialized) {
+            serverScope.cancel()
+        }
 
-        for ((socket, job) in runningJobs) {
+        for ((socket, _) in runningJobs) {
             try {
                 socket.close()
             } catch (e : IOException) {
-                Logger.e("stop()", "Error closing socket", e)
+                Logger.e("stop", "Error closing socket", e)
             }
-            job.cancel()
         }
+        runningJobs.clear()
 
-        serverSocket.close()
-        serverWorker.cancel()
+        if(::serverSocket.isInitialized && !serverSocket.isClosed) {
+            serverSocket.close()
+        }
     }
 
-    private fun handleClientConnection(socket: Socket) {
+    private fun handleClientConnection(socket: Socket, scope: CoroutineScope) {
         Logger.i("handleClientConnection", "Client Connected: $socket")
 
         val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
             Logger.e("handleClientConnection()", "$throwable")
             if(throwable is IOException) {
-                try {
-                    cleanupSocket(socket)
-                    runningJobs.remove(socket)
-                }catch (e: IOException) {
-                    Logger.e("cleaningUp", e.toString())
-                }
+                cleanupSocket(socket)
+                runningJobs.remove(socket)
             }
         }
 
-        val clientJob = CoroutineScope(Dispatchers.IO + exceptionHandler).launch {
+        val clientJob = scope.launch(exceptionHandler) {
             socket.tcpNoDelay = true
             socket.keepAlive = true
 
-            while(isActive) {
-                if(handleInitialRequest(socket)) {
-                    while (handleOngoingRequest(socket, this)) {}
-                }
+            if(handleInitialRequest(socket)) {
+                while (isActive && handleOngoingRequest(socket, this)) {}
             }
         }
         runningJobs[socket] = clientJob
+
+        clientJob.invokeOnCompletion {
+            runningJobs.remove(socket)
+            try {
+                if (socket.isConnected) socket.close()
+            } catch (e: IOException) {
+                Logger.e("invokeOnCompletion", "Error closing socket on job completion", e)
+            }
+        }
     }
 
     @Throws(IOException::class)
@@ -128,7 +135,11 @@ class UsbIpServer(
         Logger.i("handleOngoingRequest", "$inMsg")
 
         when (inMsg?.command) {
-            UsbIpBasicPacket.USBIP_CMD_SUBMIT -> submitUrbRequest(s, inMsg as UsbIpSubmitUrb, clientJobScope)
+            UsbIpBasicPacket.USBIP_CMD_SUBMIT -> {
+                clientJobScope.launch(Dispatchers.IO + CoroutineName("URB-${inMsg.seqNum}")) {
+                    submitUrbRequest(s, inMsg as UsbIpSubmitUrb)
+                }
+            }
             UsbIpBasicPacket.USBIP_CMD_UNLINK -> abortUrbRequest(s, inMsg as UsbIpUnlinkUrb)
             else -> {
                 Logger.e("handleOngoingRequest", "Unknown Command: ${inMsg?.command}")
@@ -259,7 +270,7 @@ class UsbIpServer(
         if (context != null) {
             // Since we're attached already, we can directly query the USB descriptors
             // to fill some information that Android's USB API doesn't expose
-            devDesc = context.devConn.let { UsbControlHelper.readDeviceDescriptor(it) }
+            devDesc = UsbControlHelper.readDeviceDescriptor(context)
             if (devDesc != null) {
                 ipDev.bcdDevice = devDesc.bcdDevice
             }
@@ -404,102 +415,124 @@ class UsbIpServer(
         return buildUsbDeviceInfo(dev)
     }
 
-    private suspend fun submitUrbRequest(s: Socket, msg: UsbIpSubmitUrb, clientJobScope: CoroutineScope) {
-        val reply = UsbIpSubmitUrbReply(
-            msg.seqNum,
-            0,
-            0,
-            0
-        )
+    private suspend fun submitUrbRequest(s: Socket, msg: UsbIpSubmitUrb) {
+        val reply = UsbIpSubmitUrbReply(msg.seqNum,0,0, 0)
         val deviceId: Int = devIdToDeviceId(msg.devId)
-
         val context: AttachedDeviceContext? = attachedDevices.get(deviceId)
+
         if (context == null) { // This should never happen, but kill the connection if it does
             killClient(s)
             return
         }
-        val devConn = context.devConn
 
-        if (msg.ep == 0) { // Control endpoint is handled with a special case
-            // This is little endian
-            val bb = ByteBuffer.wrap(msg.setup).order(ByteOrder.LITTLE_ENDIAN)
-            val requestType = bb.get()
-            val request = bb.get()
-            val value = bb.getShort()
-            val index = bb.getShort()
-            val length = bb.getShort()
-            if (length.toInt() != 0 && requestType.toInt() and 0x80 != 0) {
-                reply.inData = ByteArray(length.toInt())
+        var targetEndpoint: UsbEndpoint? = null
+        val endpointType =
+            if(msg.ep == 0) USB_ENDPOINT_XFER_CONTROL
+            else {
+                if (context.activeConfigurationEndpointsByNumDir != null) {
+                    val endptNumDir = msg.ep + (if (msg.direction == UsbIpBasicPacket.USBIP_DIR_IN) USB_DIR_IN else 0)
+                    targetEndpoint = context.activeConfigurationEndpointsByNumDir!!.get(endptNumDir)
+                    targetEndpoint?.type
+                } else null
             }
 
-            context.activeMessagesMutex.withLock {
-                context.activeMessages.add(msg.seqNum) // This message is now active
+        context.activeMessagesMutex.withLock { // This message is now active
+            context.activeMessages.add(msg.seqNum)
+        }
+
+        val buff: ByteBuffer = if (msg.direction == UsbIpBasicPacket.USBIP_DIR_IN) {
+            ByteBuffer.allocate(msg.transferBufferLength) // The buffer is allocated by us
+        } else {
+            ByteBuffer.wrap(msg.outData) // The buffer came in with the request
+        }
+        if (msg.direction == UsbIpBasicPacket.USBIP_DIR_IN) {
+            reply.inData = buff.array() // We need to store our buffer in the URB reply
+        }
+
+        var res: Int
+        when (endpointType) {
+            null -> {
+                Logger.e("submitUrbRequest", "EP not found: " + msg.ep)
+                res = ProtocolCodes.STATUS_NA
             }
-            // We have to handle certain control requests (SET_CONFIGURATION/SET_INTERFACE) by calling
-            // Android APIs rather than just submitting the URB directly to the device
-            val res: Int = if (!UsbControlHelper.handleInternalControlTransfer(context, requestType.toInt(), request.toInt(), value.toInt(), index.toInt())) {
-                doControlTransfer(
-                    devConn,
+            USB_ENDPOINT_XFER_CONTROL -> {
+                // This is little endian
+                val bb = ByteBuffer.wrap(msg.setup).order(ByteOrder.LITTLE_ENDIAN)
+                val requestType = bb.get()
+                val request = bb.get()
+                val value = bb.getShort()
+                val index = bb.getShort()
+                val length = bb.getShort()
+                if (length.toInt() != 0 && requestType.toInt() and 0x80 != 0) {
+                    reply.inData = ByteArray(length.toInt())
+                }
+
+                res = doControlTransfer(
+                    context,
                     requestType.toInt(),
                     request.toInt(),
                     value.toInt(),
                     index.toInt(),
                     if (requestType.toInt() and 0x80 != 0) reply.inData else msg.outData,
                     length.toInt(),
+                    300
+                )
+                Logger.i("submitUrbRequest", "control transfer result code: $res")
+            }
+            USB_ENDPOINT_XFER_BULK -> {
+                Logger.i("USB_ENDPOINT_XFER_BULK", "Bulk Transfer ${buff.array().size} bytes ${if (msg.direction == UsbIpBasicPacket.USBIP_DIR_IN) "in" else "out"} on EP ${targetEndpoint?.endpointNumber}")
+                res = doBulkTransferInChunks(
+                    context.devConn,
+                    targetEndpoint!!,
+                    buff.array(),
+                    300
+                )
+                Logger.i("USB_ENDPOINT_XFER_BULK", "Bulk Transfer complete with $res bytes (wanted ${msg.transferBufferLength})")
+            }
+            USB_ENDPOINT_XFER_INT -> {
+                Logger.i("USB_ENDPOINT_XFER_INT","Interrupt transfer ${msg.transferBufferLength} bytes ${if (msg.direction == UsbIpBasicPacket.USBIP_DIR_IN) "in" else "out"} on EP ${targetEndpoint?.endpointNumber}")
+                res = doInterruptTransfer(
+                    context.devConn,
+                    targetEndpoint!!,
+                    buff.array(),
                     100
                 )
-            } else 0
-
-            Logger.i("submitUrbRequest", "control transfer result code: $res")
-            if (res < 0) { // If the request failed, check if the device is still around
-                if (getDevice(deviceId) == null) {
-                    killClient(s) // The device is gone, so terminate the client
-                    return
+                Logger.i("USB_ENDPOINT_XFER_INT", "Interrupt transfer complete with $res bytes (wanted ${msg.transferBufferLength})")
+            }
+            else -> {
+                Logger.e("submitUrb", "Unsupported endpoint type: $endpointType")
+                context.activeMessagesMutex.withLock {
+                    context.activeMessages.remove(msg.seqNum)
                 }
-                reply.status = res
-            } else {
-                reply.actualLength = res
-                reply.status = ProtocolCodes.STATUS_OK
-            }
-            context.activeMessagesMutex.withLock {
-                if (!context.activeMessages.contains(msg.seqNum)) {
-                    return // Somebody cancelled the URB, return without responding
-                }
-            }
-            sendReply(s, reply)
-        } else { // Find the correct endpoint
-            var targetEndpoint: UsbEndpoint? = null
-            if (context.activeConfigurationEndpointsByNumDir != null){
-                val endptNumDir = msg.ep + (if (msg.direction == UsbIpBasicPacket.USBIP_DIR_IN) USB_DIR_IN else 0)
-                targetEndpoint = context.activeConfigurationEndpointsByNumDir!!.get(endptNumDir)
-            } else {
-                Logger.e("submitUrbRequest", "Attempted to transfer to non-control EP before SET_CONFIGURATION!")
-            }
-
-            if (targetEndpoint == null) {
-                Logger.e("submitUrbRequest", "EP not found: " + msg.ep)
-                reply.status = ProtocolCodes.STATUS_NA
-                sendReply(s, reply)
+                killClient(s)
                 return
             }
-            val buff: ByteBuffer = if (msg.direction == UsbIpBasicPacket.USBIP_DIR_IN) {
-                ByteBuffer.allocate(msg.transferBufferLength) // The buffer is allocated by us
-            } else {
-                ByteBuffer.wrap(msg.outData) // The buffer came in with the request
-            }
-
-            context.activeMessagesMutex.withLock { // This message is now active
-                context.activeMessages.add(msg.seqNum)
-            }
-
-            clientJobScope.launch(Dispatchers.IO + CoroutineName("URB-${msg.seqNum}")) {
-                dispatchRequest(context, deviceId, s, targetEndpoint, buff, msg)
-            }
         }
+
+        if (!currentCoroutineContext().isActive) return // Job cancelled
+
+        if (res < 0) { // If the request failed, check if the device is still around
+            if (getDevice(deviceId) == null) {
+                killClient(s) // The device is gone, so terminate the client
+                return
+            }
+            reply.status = res
+        } else {
+            reply.actualLength = res
+            reply.status = ProtocolCodes.STATUS_OK
+        }
+
+        context.activeMessagesMutex.withLock {
+            if(!context.activeMessages.remove(msg.seqNum)) return
+        }
+
+        //Logger.i("sendReply", "$reply")
+        sendReply(s, reply)
     }
 
     private suspend fun abortUrbRequest(s: Socket, msg: UsbIpUnlinkUrb) {
-        val context = socketMap[s] ?: return
+        val deviceId: Int = devIdToDeviceId(msg.devId)
+        val context: AttachedDeviceContext = attachedDevices.get(deviceId) ?: return
         var found = false
         context.activeMessagesMutex.withLock {
             if(context.activeMessages.remove(msg.seqNumToUnlink)){
@@ -518,74 +551,6 @@ class UsbIpServer(
         } catch (e: IOException) {
             e.printStackTrace()
         }
-    }
-
-    private suspend fun dispatchRequest(
-        context: AttachedDeviceContext,
-        deviceId: Int,
-        s: Socket,
-        selectedEndpoint: UsbEndpoint,
-        buff: ByteBuffer,
-        msg: UsbIpSubmitUrb
-    ) {
-        val reply = UsbIpSubmitUrbReply(
-            msg.seqNum,
-            0,
-            0,
-            0
-        )
-        if (msg.direction == UsbIpBasicPacket.USBIP_DIR_IN) {
-            reply.inData = buff.array() // We need to store our buffer in the URB reply
-        }
-        var res: Int
-        when (selectedEndpoint.type) {
-            USB_ENDPOINT_XFER_BULK -> {
-
-                Logger.i("dispatchRequest", "Bulk Transfer ${buff.array().size} bytes ${if (msg.direction == UsbIpBasicPacket.USBIP_DIR_IN) "in" else "out"} on EP ${selectedEndpoint.endpointNumber}")
-                 res = doBulkTransferInChunks(
-                    context.devConn,
-                    selectedEndpoint,
-                    buff.array(),
-                    300
-                )
-                Logger.i("dispatchRequest", "Bulk Transfer complete with $res bytes (wanted ${msg.transferBufferLength})")
-            }
-            USB_ENDPOINT_XFER_INT -> {
-                Logger.i("dispatchRequest","Interrupt transfer ${msg.transferBufferLength} bytes ${if (msg.direction == UsbIpBasicPacket.USBIP_DIR_IN) "in" else "out"} on EP ${selectedEndpoint.endpointNumber}")
-                res = doInterruptTransfer(
-                    context.devConn,
-                    selectedEndpoint,
-                    buff.array(),
-                    100
-                )
-                Logger.i("dispatchRequest", "Interrupt transfer complete with $res bytes (wanted ${msg.transferBufferLength})")
-            }
-            else -> {
-                Logger.e("dispatchRequest", "Unsupported endpoint type: " + selectedEndpoint.type)
-                context.activeMessagesMutex.withLock {
-                    context.activeMessages.remove(msg.seqNum)
-                }
-                killClient(s)
-                return
-            }
-        }
-        if (!currentCoroutineContext().isActive) return // Job cancelled
-
-        if (res < 0) {
-            val dev = getDevice(deviceId)
-            if(dev == null){
-                killClient(s)
-                return
-            }
-            reply.status = res
-        } else {
-            reply.actualLength = res
-            reply.status = ProtocolCodes.STATUS_OK
-        }
-        context.activeMessagesMutex.withLock {
-            if(!context.activeMessages.remove(msg.seqNum)) return
-        }
-        sendReply(s, reply)
     }
 
     private fun killClient(socket: Socket) {
