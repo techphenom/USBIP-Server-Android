@@ -477,27 +477,27 @@ class UsbIpServer(
                 Logger.i("submitUrbRequest", "control transfer result code: $res")
             }
             USB_ENDPOINT_XFER_BULK -> {
-                Logger.i("USB_ENDPOINT_XFER_BULK", "Bulk Transfer ${buff.array().size} bytes ${if (msg.direction == UsbIpBasicPacket.USBIP_DIR_IN) "in" else "out"} on EP ${targetEndpoint?.endpointNumber}")
+                Logger.i("submitUrbRequest", "Bulk Transfer ${buff.array().size} bytes ${if (msg.direction == UsbIpBasicPacket.USBIP_DIR_IN) "in" else "out"} on EP ${targetEndpoint?.endpointNumber}")
                 res = doBulkTransferInChunks(
                     context.devConn,
                     targetEndpoint!!,
                     buff.array(),
                     300
                 )
-                Logger.i("USB_ENDPOINT_XFER_BULK", "Bulk Transfer complete with $res bytes (wanted ${msg.transferBufferLength})")
+                Logger.i("submitUrbRequest", "Bulk Transfer complete with $res bytes (wanted ${msg.transferBufferLength})")
             }
             USB_ENDPOINT_XFER_INT -> {
-                Logger.i("USB_ENDPOINT_XFER_INT","Interrupt transfer ${msg.transferBufferLength} bytes ${if (msg.direction == UsbIpBasicPacket.USBIP_DIR_IN) "in" else "out"} on EP ${targetEndpoint?.endpointNumber}")
+                Logger.i("submitUrbRequest","Interrupt transfer ${msg.transferBufferLength} bytes ${if (msg.direction == UsbIpBasicPacket.USBIP_DIR_IN) "in" else "out"} on EP ${targetEndpoint?.endpointNumber}")
                 res = doInterruptTransfer(
                     context.devConn,
                     targetEndpoint!!,
                     buff.array(),
                     100
                 )
-                Logger.i("USB_ENDPOINT_XFER_INT", "Interrupt transfer complete with $res bytes (wanted ${msg.transferBufferLength})")
+                Logger.i("submitUrbRequest", "Interrupt transfer complete with $res bytes (wanted ${msg.transferBufferLength})")
             }
             else -> {
-                Logger.e("submitUrb", "Unsupported endpoint type: $endpointType")
+                Logger.e("submitUrbRequest", "Unsupported endpoint type: $endpointType")
                 context.activeMessagesMutex.withLock {
                     context.activeMessages.remove(msg.seqNum)
                 }
@@ -523,8 +523,10 @@ class UsbIpServer(
             if(!context.activeMessages.remove(msg.seqNum)) return
         }
 
-        //Logger.i("sendReply", "$reply")
-        sendReply(s, reply)
+        context.socketWriteMutex.withLock {
+            Logger.i("submitUrbRequest", "$reply")
+            s.getOutputStream().write(reply.serialize())
+        }
     }
 
     private suspend fun abortUrbRequest(s: Socket, msg: UsbIpUnlinkUrb) {
@@ -538,15 +540,9 @@ class UsbIpServer(
         }
         val reply = UsbIpUnlinkUrbReply(msg.seqNum, msg.devId, msg.direction, msg.ep)
         reply.status = if (found) UsbIpBasicPacket.USBIP_ECONNRESET else 0
-        sendReply(s, reply)
-    }
-
-    private fun sendReply(s: Socket, reply: UsbIpBasicPacket) {
-        Logger.i("sendReply", "$reply")
-        try { // We need to synchronize to avoid writing on top of ourselves
-            synchronized(s) { s.getOutputStream().write(reply.serialize()) }
-        } catch (e: IOException) {
-            e.printStackTrace()
+        context.socketWriteMutex.withLock {
+            Logger.i("abortUrbRequest", "$reply")
+            s.getOutputStream().write(reply.serialize())
         }
     }
 
