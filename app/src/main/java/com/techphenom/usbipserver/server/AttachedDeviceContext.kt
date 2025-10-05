@@ -13,5 +13,6 @@ class AttachedDeviceContext {
     var activeConfigurationEndpointsByNumDir: SparseArray<UsbEndpoint>? = null// SparseArray()
     var activeMessages: HashSet<Int> = HashSet() // msg.seqNum
     val activeMessagesMutex = Mutex()
+    val socketWriteMutex = Mutex()
     var totalEndpointCount: Int = 0
 }
