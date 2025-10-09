@@ -33,6 +33,7 @@ import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
@@ -69,7 +70,8 @@ class UsbIpServer(
         val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
             Logger.e("start()" , "$throwable")
         }
-        CoroutineScope(Dispatchers.IO + exceptionHandler).launch {
+        serverScope = CoroutineScope(Dispatchers.IO + exceptionHandler)
+        serverScope.launch {
             serverSocket = ServerSocket(USBIP_PORT)
 
             while (isActive) {
@@ -107,8 +109,9 @@ class UsbIpServer(
                 runningJobs.remove(socket)
             }
         }
+        val clientScope = CoroutineScope(scope.coroutineContext + SupervisorJob() + exceptionHandler)
 
-        val clientJob = scope.launch(exceptionHandler) {
+        val clientJob = clientScope.launch {
             socket.tcpNoDelay = true
             socket.keepAlive = true
 
