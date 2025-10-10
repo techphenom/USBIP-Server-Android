@@ -8,15 +8,11 @@ import android.hardware.usb.UsbManager
 import android.net.wifi.WifiManager
 import android.os.IBinder
 import android.os.PowerManager
-import android.util.SparseArray
 import androidx.core.app.NotificationCompat
-import androidx.core.util.isEmpty
 import com.techphenom.usbipserver.data.UsbIpRepository
-import com.techphenom.usbipserver.server.AttachedDeviceContext
 import com.techphenom.usbipserver.server.UsbIpServer
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
-import androidx.core.util.size
 import com.techphenom.usbipserver.data.UsbDeviceWithState
 import com.techphenom.usbipserver.server.UsbIpDeviceConstants.UsbIpDeviceState
 import com.techphenom.usbipserver.server.protocol.utils.Logger
@@ -30,6 +26,7 @@ class UsbIpService: Service() {
     private lateinit var server: UsbIpServer
     private lateinit var cpuWakeLock: PowerManager.WakeLock
     private lateinit var lowLatencyWifiLock: WifiManager.WifiLock
+    private val NOTIFICATION_ID: Int = 1
 
     enum class Actions {
         START, STOP
@@ -83,8 +80,8 @@ class UsbIpService: Service() {
             "running_channel")
             .setSmallIcon(R.drawable.usb_on)
             .setContentTitle("USB/IP Server Running")
-            .setContentText( if (attachedDevices.isEmpty()) "No devices are being shared."
-                                else "Sharing ${attachedDevices.size} devices.")
+            .setContentText( if (server.getAttachedDeviceCount() == 0) "No devices are being shared."
+                                else "Sharing ${server.getAttachedDeviceCount()} devices.")
             .setAutoCancel(false)
             .setOngoing(true)
             .addAction(R.drawable.usb_off, "Stop Server", pStopSelf)
@@ -93,7 +90,7 @@ class UsbIpService: Service() {
             startForeground(NOTIFICATION_ID, notification, FOREGROUND_SERVICE_TYPE_DATA_SYNC)
 
         } catch (ex: SecurityException) {
-            Logger.e("updateNotif", "Couldn't Start Foreground Service: Security Exception Thrown")
+            Logger.e("updateNotif", "Couldn't Start Foreground Service", ex)
         }
     }
 
@@ -117,10 +114,5 @@ class UsbIpService: Service() {
 
     override fun onBind(p0: Intent?): IBinder? {
         return null
-    }
-
-    companion object {
-        private const val NOTIFICATION_ID: Int = 1
-        val attachedDevices = SparseArray<AttachedDeviceContext>()
     }
 }
