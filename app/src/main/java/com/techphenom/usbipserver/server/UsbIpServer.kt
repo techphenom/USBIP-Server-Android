@@ -7,7 +7,6 @@ import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import com.techphenom.usbipserver.UsbIpEvent
-import com.techphenom.usbipserver.UsbIpService.Companion.attachedDevices
 import com.techphenom.usbipserver.data.UsbIpRepository
 import com.techphenom.usbipserver.server.protocol.ProtocolCodes
 import com.techphenom.usbipserver.server.protocol.initial.CommonPacket
@@ -32,7 +31,6 @@ import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
@@ -45,6 +43,8 @@ import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.ConcurrentHashMap
+import com.techphenom.usbipserver.server.UsbIpDeviceConstants.UsbIpDeviceState.*
+import kotlinx.coroutines.ensureActive
 
 class UsbIpServer(
     private val repository: UsbIpRepository,
@@ -52,10 +52,9 @@ class UsbIpServer(
     private val onEvent: (event: UsbIpEvent) -> Unit
     ) {
 
-    private val runningJobs = ConcurrentHashMap<Socket, Job>()
-    private var socketMap = HashMap<Socket, AttachedDeviceContext>()
     private lateinit var serverSocket: ServerSocket
     private lateinit var serverScope: CoroutineScope
+    val attachedDevices = ConcurrentHashMap<Socket, AttachedDeviceContext>()
 
     companion object {
         private const val FLAG_POSSIBLE_SPEED_LOW = 0x01
@@ -85,18 +84,21 @@ class UsbIpServer(
             serverScope.cancel()
         }
 
-        for ((socket, _) in runningJobs) {
+        for (socket in attachedDevices.keys) {
             try {
                 socket.close()
             } catch (e : IOException) {
                 Logger.e("stop", "Error closing socket", e)
             }
         }
-        runningJobs.clear()
 
         if(::serverSocket.isInitialized && !serverSocket.isClosed) {
             serverSocket.close()
         }
+    }
+
+    fun getAttachedDeviceCount(): Int {
+        return attachedDevices.size
     }
 
     private fun handleClientConnection(socket: Socket, scope: CoroutineScope) {
@@ -104,29 +106,22 @@ class UsbIpServer(
 
         val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
             Logger.e("handleClientConnection()", "$throwable")
-            if(throwable is IOException) {
-                cleanupSocket(socket)
-                runningJobs.remove(socket)
-            }
         }
+
         val clientScope = CoroutineScope(scope.coroutineContext + SupervisorJob() + exceptionHandler)
-
-        val clientJob = clientScope.launch {
-            socket.tcpNoDelay = true
-            socket.keepAlive = true
-
-            if(handleInitialRequest(socket)) {
-                while (isActive && handleOngoingRequest(socket, this)) {}
-            }
-        }
-        runningJobs[socket] = clientJob
-
-        clientJob.invokeOnCompletion {
-            runningJobs.remove(socket)
+        clientScope.launch {
             try {
-                if (socket.isConnected) socket.close()
-            } catch (e: IOException) {
-                Logger.e("invokeOnCompletion", "Error closing socket on job completion", e)
+                socket.tcpNoDelay = true
+                socket.keepAlive = true
+
+                if(handleInitialRequest(socket)) {
+                    while (isActive && handleOngoingRequest(socket, this)) {}
+                }
+            } finally {
+                cleanup(socket)
+                try {
+                    if (socket.isConnected) socket.close()
+                } catch (_: IOException) {} // This is expected if the socket was already closed.
             }
         }
     }
@@ -153,25 +148,19 @@ class UsbIpServer(
         return true
     }
 
-    private fun cleanupSocket(socket: Socket) {
-        val context: AttachedDeviceContext = socketMap.remove(socket) ?: return
-        cleanupDetachedDevice(context.device.deviceId)
-    }
-
-    private fun cleanupDetachedDevice(deviceId: Int) {
-        val context: AttachedDeviceContext = attachedDevices.get(deviceId) ?: return
-
-        attachedDevices.remove(deviceId)
+    private fun cleanup(socket: Socket) {
+        val context: AttachedDeviceContext = attachedDevices.get(socket) ?: return
+        attachedDevices.remove(socket)
 
         // Release our claim to the interfaces
         for (i in 0 until context.device.interfaceCount) {
             context.devConn.releaseInterface(context.device.getInterface(i))
         }
-
         context.devConn.close()
 
+        val dev = getDevice(context.device.deviceId)
+        if(dev != null) onEvent(UsbIpEvent.DeviceDisconnectedEvent(dev))
         onEvent(UsbIpEvent.OnUpdateNotificationEvent)
-        onEvent(UsbIpEvent.DeviceDisconnectedEvent(context.device))
     }
 
     @Throws(IOException::class)
@@ -179,26 +168,20 @@ class UsbIpServer(
         val incomingMessage = convertInputStreamToPacket(socket.getInputStream())
         val outgoingMessage: CommonPacket
 
-        if(incomingMessage == null) {
-            socket.close()
-            Logger.e("handleInitialRequest", "Incoming packet null")
-            return false
-        }
+        if(incomingMessage == null) throw IOException("Incoming packet null")
+
         var result = false
         Logger.i("handleInitialRequest", "$incomingMessage")
 
         when(incomingMessage.code) {
             ProtocolCodes.OP_REQ_DEVLIST -> {
                 val replyDevListPacket = ReplyDevListPacket(incomingMessage.version)
-                val connectableDevices = repository.getUsbDevices().value?.filter { dev ->
-                    dev.state == UsbIpDeviceConstants.UsbIpDeviceState.CONNECTABLE ||
-                            dev.state == UsbIpDeviceConstants.UsbIpDeviceState.CONNECTED
-                }
-                val devices = connectableDevices?.map {
-                    it.device
-                }
-                replyDevListPacket.devInfoList = devices?.let { convertDevices(it) }
-                if (replyDevListPacket.devInfoList == null) {
+
+                replyDevListPacket.devInfoList = repository.getUsbDevices().value
+                    ?.filter { it.state == CONNECTABLE || it.state == CONNECTED }
+                    ?.map { buildUsbDeviceInfo(it.device) }
+
+                if (replyDevListPacket.devInfoList.isNullOrEmpty()) {
                     replyDevListPacket.status = ProtocolCodes.STATUS_NA
                 }
                 outgoingMessage = replyDevListPacket
@@ -207,12 +190,10 @@ class UsbIpServer(
                 val importRequest: ImportDeviceRequest = incomingMessage as ImportDeviceRequest
                 val importReply = ImportDeviceReply(incomingMessage.version)
 
-                result = attachToDevice(socket, importRequest.busId)
-                if (result) {
-                    importReply.devInfo = getDeviceByBusId(importRequest.busId)
-                    if(importReply.devInfo == null) {
-                        result = false
-                    }
+                val context = attachToDevice(socket, importRequest.busId)
+                if (context != null) {
+                    importReply.devInfo = getDeviceInfo(importRequest.busId, context)
+                    result = importReply.devInfo != null
                 }
                 importReply.status = if(result) ProtocolCodes.STATUS_OK else ProtocolCodes.STATUS_NA
 
@@ -226,16 +207,7 @@ class UsbIpServer(
         return result
     }
 
-    private fun convertDevices(devices: List<UsbDevice>): List<UsbDeviceInfo> {
-        val result = mutableListOf<UsbDeviceInfo>()
-        for (device in devices) {
-            val devInfo = buildUsbDeviceInfo(device)
-            result.add(devInfo)
-        }
-        return result
-    }
-
-    private fun buildUsbDeviceInfo(device: UsbDevice): UsbDeviceInfo {
+    private fun buildUsbDeviceInfo(device: UsbDevice, context: AttachedDeviceContext? = null): UsbDeviceInfo {
         val info = UsbDeviceInfo()
         val ipDev = UsbIpDevice()
 
@@ -268,7 +240,6 @@ class UsbIpServer(
             info.interfaces[i]!!.bInterfaceProtocol = iface.interfaceProtocol.toByte()
         }
 
-        val context: AttachedDeviceContext? = attachedDevices.get(device.deviceId)
         var devDesc: UsbDeviceDescriptor? = null
         if (context != null) {
             // Since we're attached already, we can directly query the USB descriptors
@@ -364,17 +335,14 @@ class UsbIpServer(
         } else if (possibleSpeeds and FLAG_POSSIBLE_SPEED_SUPER != 0) {
             UsbIpDeviceConstants.USB_SPEED_SUPER
         } else {
-            UsbIpDeviceConstants.USB_SPEED_UNKNOWN // Something went very wrong in speed detection
+            UsbIpDeviceConstants.USB_SPEED_UNKNOWN // Something went very wrong
         }
     }
 
-    private fun attachToDevice(s: Socket, busId: String): Boolean {
-        val dev: UsbDevice = getDevice(busId) ?: return false
-        if (attachedDevices.get(dev.deviceId) != null) {
-            return false // Already attached
-        }
-
-        val devConn: UsbDeviceConnection = usbManager.openDevice(dev) ?: return false
+    private fun attachToDevice(s: Socket, busId: String): AttachedDeviceContext? {
+        val dev: UsbDevice = getDevice(busId) ?: return null
+        if (attachedDevices.get(s) != null) return null // Already attached
+        val devConn: UsbDeviceConnection = usbManager.openDevice(dev) ?: return null
 
         // Claim all interfaces since we don't know which one the client wants
         for (i in 0 until dev.interfaceCount) {
@@ -383,50 +351,37 @@ class UsbIpServer(
             }
         }
 
-        // Create a context for this attachment
         val attachedDeviceContext = AttachedDeviceContext()
         attachedDeviceContext.devConn = devConn
         attachedDeviceContext.device = dev
 
-        var endpointCount = 0
         for (i in 0 until dev.interfaceCount) { // Count all endpoints on all interfaces
-            endpointCount += dev.getInterface(i).endpointCount
+            attachedDeviceContext.totalEndpointCount += dev.getInterface(i).endpointCount
         }
 
-        attachedDeviceContext.totalEndpointCount = endpointCount
-
-        attachedDevices.put(dev.deviceId, attachedDeviceContext)
-        socketMap[s] = attachedDeviceContext
+        attachedDevices.put(s, attachedDeviceContext)
         onEvent(UsbIpEvent.OnUpdateNotificationEvent)
         onEvent(UsbIpEvent.DeviceConnectedEvent(dev))
-        return true
+        return attachedDeviceContext
     }
 
     private fun getDevice(deviceId: Int): UsbDevice? {
-        for (dev in usbManager.deviceList.values) {
-            if (dev.deviceId == deviceId) {
-                return dev
-            }
-        }
-        return null
+        return usbManager.deviceList.values.find { it.deviceId == deviceId }
     }
     private fun getDevice(busId: String): UsbDevice? {
         return getDevice(busIdToDeviceId(busId))
     }
-    private fun getDeviceByBusId(busId: String): UsbDeviceInfo? {
+    private fun getDeviceInfo(busId: String, context: AttachedDeviceContext): UsbDeviceInfo? {
         val dev: UsbDevice = getDevice(busId) ?: return null
-        return buildUsbDeviceInfo(dev)
+        return buildUsbDeviceInfo(dev, context)
     }
 
     private suspend fun submitUrbRequest(s: Socket, msg: UsbIpSubmitUrb) {
         val reply = UsbIpSubmitUrbReply(msg.seqNum,0,0, 0)
         val deviceId: Int = devIdToDeviceId(msg.devId)
-        val context: AttachedDeviceContext? = attachedDevices.get(deviceId)
+        val context: AttachedDeviceContext? = attachedDevices.get(s)
 
-        if (context == null) { // This should never happen, but kill the connection if it does
-            killClient(s)
-            return
-        }
+        if (context == null) throw IOException("Client requested non-attached device")
 
         var targetEndpoint: UsbEndpoint? = null
         val endpointType =
@@ -499,22 +454,14 @@ class UsbIpServer(
                 )
                 Logger.i("submitUrbRequest", "Interrupt transfer complete with $res bytes (wanted ${msg.transferBufferLength})")
             }
-            else -> {
-                Logger.e("submitUrbRequest", "Unsupported endpoint type: $endpointType")
-                context.activeMessagesMutex.withLock {
-                    context.activeMessages.remove(msg.seqNum)
-                }
-                killClient(s)
-                return
-            }
+            else -> throw IOException("Unsupported endpoint type: $endpointType")
         }
 
-        if (!currentCoroutineContext().isActive) return // Job cancelled
+        currentCoroutineContext().ensureActive()
 
         if (res < 0) { // If the request failed, check if the device is still around
             if (getDevice(deviceId) == null) {
-                killClient(s) // The device is gone, so terminate the client
-                return
+                throw IOException("USB device ($deviceId) disappeared during transfer.")
             }
             reply.status = res
         } else {
@@ -533,8 +480,7 @@ class UsbIpServer(
     }
 
     private suspend fun abortUrbRequest(s: Socket, msg: UsbIpUnlinkUrb) {
-        val deviceId: Int = devIdToDeviceId(msg.devId)
-        val context: AttachedDeviceContext = attachedDevices.get(deviceId) ?: return
+        val context: AttachedDeviceContext = attachedDevices.get(s) ?: return
         var found = false
         context.activeMessagesMutex.withLock {
             if(context.activeMessages.remove(msg.seqNumToUnlink)){
@@ -548,11 +494,4 @@ class UsbIpServer(
             s.getOutputStream().write(reply.serialize())
         }
     }
-
-    private fun killClient(socket: Socket) {
-        val job: Job? = runningJobs.remove(socket)
-        socket.close()
-        job?.cancel()
-    }
 }
-
