@@ -4,21 +4,19 @@ package com.techphenom.usbipserver.server.protocol.utils
 fun shortToHex(value: Short): String {
     val format = HexFormat {
         upperCase = true
-        bytes {
-            byteSeparator = " " // One space
-            bytePrefix = "0x"
+        number {
+            prefix = "0x"
         }
     }
-    return value.toInt().toHexString(format)
+    return value.toHexString(format)
 }
 
 @OptIn(ExperimentalStdlibApi::class)
 fun intToHex(value: Int): String {
     val format = HexFormat {
         upperCase = true
-        bytes {
-            byteSeparator = " " // One space
-            bytePrefix = "0x"
+        number {
+            prefix = "0x"
         }
     }
     return value.toHexString(format)

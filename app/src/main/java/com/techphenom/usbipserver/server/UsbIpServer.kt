@@ -41,7 +41,6 @@ import java.io.IOException
 import java.net.ServerSocket
 import java.net.Socket
 import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.util.concurrent.ConcurrentHashMap
 import com.techphenom.usbipserver.server.UsbIpDeviceConstants.UsbIpDeviceState.*
 import kotlinx.coroutines.ensureActive
@@ -414,22 +413,15 @@ class UsbIpServer(
                 res = ProtocolCodes.STATUS_NA
             }
             USB_ENDPOINT_XFER_CONTROL -> {
-                // This is little endian
-                val bb = ByteBuffer.wrap(msg.setup).order(ByteOrder.LITTLE_ENDIAN)
-                val requestType = bb.get()
-                val request = bb.get()
-                val value = bb.getShort()
-                val index = bb.getShort()
-                val length = bb.getShort()
-
+                Logger.i("submitUrbRequest","doControlTransfer - SETUP: ${msg.setup}")
                 res = doControlTransfer(
                     context,
-                    requestType.toInt(),
-                    request.toInt(),
-                    value.toInt(),
-                    index.toInt(),
+                    msg.setup.requestType,
+                    msg.setup.request,
+                    msg.setup.value,
+                    msg.setup.index,
                     buff.array(),
-                    length.toInt(),
+                    msg.setup.length,
                     300
                 )
                 Logger.i("submitUrbRequest", "control transfer result code: $res")
