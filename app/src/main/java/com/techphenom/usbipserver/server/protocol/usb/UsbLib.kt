@@ -6,6 +6,9 @@ class UsbLib {
         System.loadLibrary("usbipfunctions")
     }
 
+    external fun init(): Int
+    external fun exit()
+
     external fun doControlTransfer(
         fd: Int,
         requestType: Byte,
@@ -18,6 +21,13 @@ class UsbLib {
     ): Int
 
     external fun doBulkTransfer(
+        fd: Int,
+        endpoint: Int,
+        data: ByteArray?,
+        timeout: Int
+    ): Int
+
+    external fun doInterruptTransfer(
         fd: Int,
         endpoint: Int,
         data: ByteArray?,

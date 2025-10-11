@@ -24,8 +24,6 @@ import com.techphenom.usbipserver.server.protocol.usb.UsbDeviceDescriptor
 import com.techphenom.usbipserver.server.protocol.usb.UsbIpDevice
 import com.techphenom.usbipserver.server.protocol.usb.UsbIpInterface
 import com.techphenom.usbipserver.server.protocol.usb.doBulkTransferInChunks
-import com.techphenom.usbipserver.server.protocol.usb.doControlTransfer
-import com.techphenom.usbipserver.server.protocol.usb.doInterruptTransfer
 import com.techphenom.usbipserver.server.protocol.utils.*
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineName
@@ -43,6 +41,7 @@ import java.net.Socket
 import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentHashMap
 import com.techphenom.usbipserver.server.UsbIpDeviceConstants.UsbIpDeviceState.*
+import com.techphenom.usbipserver.server.protocol.usb.UsbLib
 import kotlinx.coroutines.ensureActive
 
 class UsbIpServer(
@@ -53,7 +52,9 @@ class UsbIpServer(
 
     private lateinit var serverSocket: ServerSocket
     private lateinit var serverScope: CoroutineScope
-    val attachedDevices = ConcurrentHashMap<Socket, AttachedDeviceContext>()
+    private val usbLib = UsbLib()
+    private val attachedDevices = ConcurrentHashMap<Socket, AttachedDeviceContext>()
+
 
     companion object {
         private const val FLAG_POSSIBLE_SPEED_LOW = 0x01
@@ -64,10 +65,11 @@ class UsbIpServer(
     }
 
     fun start() {
-
         val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
             Logger.e("start()" , "$throwable")
         }
+        if(usbLib.init() < 0) throw IOException("Unable to initialize libusb")
+
         serverScope = CoroutineScope(Dispatchers.IO + exceptionHandler)
         serverScope.launch {
             serverSocket = ServerSocket(USBIP_PORT)
@@ -94,6 +96,7 @@ class UsbIpServer(
         if(::serverSocket.isInitialized && !serverSocket.isClosed) {
             serverSocket.close()
         }
+        usbLib.exit()
     }
 
     fun getAttachedDeviceCount(): Int {
@@ -243,7 +246,7 @@ class UsbIpServer(
         if (context != null) {
             // Since we're attached already, we can directly query the USB descriptors
             // to fill some information that Android's USB API doesn't expose
-            devDesc = UsbControlHelper.readDeviceDescriptor(context)
+            devDesc = UsbControlHelper.readDeviceDescriptor(usbLib, context)
             if (devDesc != null) {
                 ipDev.bcdDevice = devDesc.bcdDevice
             }
@@ -414,21 +417,28 @@ class UsbIpServer(
             }
             USB_ENDPOINT_XFER_CONTROL -> {
                 Logger.i("submitUrbRequest","doControlTransfer - SETUP: ${msg.setup}")
-                res = doControlTransfer(
-                    context,
-                    msg.setup.requestType,
-                    msg.setup.request,
-                    msg.setup.value,
-                    msg.setup.index,
-                    buff.array(),
-                    msg.setup.length,
-                    300
-                )
-                Logger.i("submitUrbRequest", "control transfer result code: $res")
+                res = with(msg.setup) {
+                    if(!UsbControlHelper.handleInternalControlTransfer(context, requestType, request, value,index )) {
+                        usbLib.doControlTransfer(
+                            context.devConn.fileDescriptor,
+                            requestType.toByte(),
+                            request.toByte(),
+                            value.toShort(),
+                            index.toShort(),
+                            buff.array(),
+                            length,
+                            300
+                        )
+                    } else 0
+                }
+                if (res < 0 && res != -110) { // Don't print for ETIMEDOUT
+                    Logger.e("submitUrbRequest","controlTransfer failed: $res")
+                } else Logger.i("submitUrbRequest", "controlTransfer result code: $res")
             }
             USB_ENDPOINT_XFER_BULK -> {
                 Logger.i("submitUrbRequest", "Bulk Transfer ${buff.array().size} bytes ${if (msg.direction == UsbIpBasicPacket.USBIP_DIR_IN) "in" else "out"} on EP ${targetEndpoint?.endpointNumber}")
                 res = doBulkTransferInChunks(
+                    usbLib,
                     context.devConn,
                     targetEndpoint!!,
                     buff.array(),
@@ -438,9 +448,9 @@ class UsbIpServer(
             }
             USB_ENDPOINT_XFER_INT -> {
                 Logger.i("submitUrbRequest","Interrupt transfer ${msg.transferBufferLength} bytes ${if (msg.direction == UsbIpBasicPacket.USBIP_DIR_IN) "in" else "out"} on EP ${targetEndpoint?.endpointNumber}")
-                res = doInterruptTransfer(
-                    context.devConn,
-                    targetEndpoint!!,
+                res = usbLib.doInterruptTransfer(
+                    context.devConn.fileDescriptor,
+                    targetEndpoint!!.address,
                     buff.array(),
                     100
                 )

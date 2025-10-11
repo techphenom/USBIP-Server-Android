@@ -3,74 +3,14 @@ package com.techphenom.usbipserver.server.protocol.usb
 import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbEndpoint
-import com.techphenom.usbipserver.server.AttachedDeviceContext
-import com.techphenom.usbipserver.server.protocol.ongoing.UsbIpSubmitUrb
 import com.techphenom.usbipserver.server.protocol.utils.Logger
 import kotlin.math.min
 import kotlin.collections.sliceArray
 
 private const val TAG = "TransferUtils"
 
-fun doInterruptTransfer(
-    devConn: UsbDeviceConnection,
-    endpoint: UsbEndpoint,
-    buff: ByteArray,
-    timeout: Int
-): Int {
-    val res = UsbLib().doBulkTransfer(devConn.fileDescriptor, endpoint.address, buff, timeout)
-    if (res < 0 && res != -110) { // Don't print for ETIMEDOUT
-        Logger.e(TAG,"interruptTransfer failed: $res")
-    }
-    return res
-}
-
-fun doBulkTransfer(
-    devConn: UsbDeviceConnection,
-    endpoint: UsbEndpoint,
-    buff: ByteArray,
-    timeout: Int
-): Int {
-    Logger.i(TAG,"doBulkTransfer - SETUP: ${devConn.fileDescriptor} - ${endpoint.address} - ${buff.size}")
-    val res = UsbLib().doBulkTransfer(devConn.fileDescriptor, endpoint.address, buff, timeout)
-    if (res < 0  && res != -110) { // Don't print for ETIMEDOUT
-        Logger.e(TAG,"bulkTransfer failed: $res")
-    }
-    return res
-}
-
-fun doControlTransfer(
-    context: AttachedDeviceContext,
-    requestType: Int,
-    request: Int,
-    value: Int,
-    index: Int,
-    buff: ByteArray,
-    length: Int,
-    timeout: Int
-): Int {
-    // We have to handle certain control requests (SET_CONFIGURATION/SET_INTERFACE) by calling
-    // Android APIs rather than just submitting the URB directly to the device
-    val res = if(!UsbControlHelper.handleInternalControlTransfer(context, requestType, request, value, index)) {
-
-        UsbLib().doControlTransfer(
-            context.devConn.fileDescriptor,
-            requestType.toByte(),
-            request.toByte(),
-            value.toShort(),
-            index.toShort(),
-            buff,
-            length,
-            timeout
-        )
-    } else 0
-
-    if (res < 0 && res != -110) { // Don't print for ETIMEDOUT
-        Logger.e(TAG,"controlTransfer failed: $res")
-    }
-    return res
-}
-
 fun doBulkTransferInChunks(
+    usbLib: UsbLib,
     devConn: UsbDeviceConnection,
     endpoint: UsbEndpoint,
     buff: ByteArray,
@@ -93,7 +33,7 @@ fun doBulkTransferInChunks(
             buff.sliceArray(offset until (offset + currentChunkSize))
         }
 
-        val res = UsbLib().doBulkTransfer(
+        val res = usbLib.doBulkTransfer(
             devConn.fileDescriptor,
             endpoint.address,
             chunkBuffer,
