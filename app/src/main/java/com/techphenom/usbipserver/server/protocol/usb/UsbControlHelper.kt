@@ -1,7 +1,5 @@
 package com.techphenom.usbipserver.server.protocol.usb
 
-import android.hardware.usb.UsbConstants
-import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
 import android.util.SparseArray
@@ -46,7 +44,7 @@ class UsbControlHelper {
             } else UsbDeviceDescriptor(descriptorBuffer)
         }
         fun handleInternalControlTransfer(
-            deviceContext: AttachedDeviceContext,
+            context: AttachedDeviceContext,
             requestType: Int,
             request: Int,
             value: Int,
@@ -55,20 +53,20 @@ class UsbControlHelper {
             if (requestType == SET_CONFIGURATION_REQUEST_TYPE && request == SET_CONFIGURATION_REQUEST) {
                 Logger.i(TAG, "Handling SET_CONFIGURATION via Android API")
 
-                for (i in 0..<deviceContext.device.configurationCount) {
-                    val config = deviceContext.device.getConfiguration(i)
+                for (i in 0..<context.device.configurationCount) {
+                    val config = context.device.getConfiguration(i)
                     if (config.id == value) {
                         // If we have a current config, we need unclaim all interfaces to allow the
                         // configuration change to work properly.
-                        if (deviceContext.activeConfiguration != null) {
-                            Logger.i(TAG, "Unclaiming all interfaces from old configuration: " + deviceContext.activeConfiguration!!.id)
-                            for (j in 0..<deviceContext.activeConfiguration!!.interfaceCount) {
-                                val iface: UsbInterface? = deviceContext.activeConfiguration!!.getInterface(j)
-                                deviceContext.devConn.releaseInterface(iface)
+                        if (context.activeConfiguration != null) {
+                            Logger.i(TAG, "Unclaiming all interfaces from old configuration: " + context.activeConfiguration!!.id)
+                            for (j in 0..<context.activeConfiguration!!.interfaceCount) {
+                                val iface: UsbInterface? = context.activeConfiguration!!.getInterface(j)
+                                context.devConn.releaseInterface(iface)
                             }
                         }
 
-                        if (!deviceContext.devConn.setConfiguration(config)) {
+                        if (!context.devConn.setConfiguration(config)) {
                             // This can happen for certain types of devices where Android itself
                             // has set the configuration for us. Let's just hope that whatever the
                             // client wanted is also what Android selected :/
@@ -76,25 +74,25 @@ class UsbControlHelper {
                         }
 
                         // This is now the active configuration
-                        deviceContext.activeConfiguration = config
+                        context.activeConfiguration = config
 
                         // Construct the cache of endpoint mappings
-                        deviceContext.activeConfigurationEndpointsByNumDir = SparseArray<UsbEndpoint>()
-                        for (j in 0..<deviceContext.activeConfiguration!!.interfaceCount) {
-                            val iface = deviceContext.activeConfiguration!!.getInterface(j)
+                        context.activeConfigurationEndpointsByNumDir = SparseArray<UsbEndpoint>()
+                        for (j in 0..<context.activeConfiguration!!.interfaceCount) {
+                            val iface = context.activeConfiguration!!.getInterface(j)
                             for (k in 0..<iface.endpointCount) {
                                 val endp = iface.getEndpoint(k)
-                                deviceContext.activeConfigurationEndpointsByNumDir?.put(
+                                context.activeConfigurationEndpointsByNumDir?.put(
                                     endp.direction or endp.endpointNumber,
                                     endp
                                 )
                             }
                         }
 
-                        Logger.i(TAG,"Claiming all interfaces from new configuration: " + deviceContext.activeConfiguration!!.id)
-                        for (j in 0..<deviceContext.activeConfiguration!!.interfaceCount) {
-                            val iface = deviceContext.activeConfiguration!!.getInterface(j)
-                            if (!deviceContext.devConn.claimInterface(iface, true)) {
+                        Logger.i(TAG,"Claiming all interfaces from new configuration: " + context.activeConfiguration!!.id)
+                        for (j in 0..<context.activeConfiguration!!.interfaceCount) {
+                            val iface = context.activeConfiguration!!.getInterface(j)
+                            if (!context.devConn.claimInterface(iface, true)) {
                                 Logger.e(TAG,"Unable to claim interface: ${iface.id}")
                             }
                         }
@@ -106,11 +104,11 @@ class UsbControlHelper {
             } else if (requestType == SET_INTERFACE_REQUEST_TYPE && request == SET_INTERFACE_REQUEST) {
                 Logger.i(TAG, "Handling SET_INTERFACE via Android API")
 
-                if (deviceContext.activeConfiguration != null) {
-                    for (i in 0..<deviceContext.activeConfiguration!!.interfaceCount) {
-                        val iface = deviceContext.activeConfiguration!!.getInterface(i)
+                if (context.activeConfiguration != null) {
+                    for (i in 0..<context.activeConfiguration!!.interfaceCount) {
+                        val iface = context.activeConfiguration!!.getInterface(i)
                         if (iface.id == index && iface.alternateSetting == value) {
-                            if (!deviceContext.devConn.setInterface(iface)) {
+                            if (!context.devConn.setInterface(iface)) {
                                 Logger.e(TAG, "Unable to set interface: ${iface.id}")
                             }
                             return true

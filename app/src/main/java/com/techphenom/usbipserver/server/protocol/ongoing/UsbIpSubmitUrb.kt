@@ -14,7 +14,7 @@ class UsbIpSubmitUrb(header: ByteArray) : UsbIpBasicPacket(header) {
     var numberOfPackets = 0
     var interval = 0
 
-    lateinit var setup: ByteArray
+    lateinit var setup: UsbControlSetup
     var outData: ByteArray = ByteArray(0)
 
     override fun toString(): String {
@@ -26,7 +26,7 @@ class UsbIpSubmitUrb(header: ByteArray) : UsbIpBasicPacket(header) {
                 Start Frame: $startFrame,
                 Number of Packets: $numberOfPackets,
                 Interval: $interval,
-                Setup: ${setup.contentToString()}
+                Setup: $setup
             """
     }
 
@@ -48,8 +48,10 @@ class UsbIpSubmitUrb(header: ByteArray) : UsbIpBasicPacket(header) {
             msg.startFrame = bb.getInt()
             msg.numberOfPackets = bb.getInt()
             msg.interval = bb.getInt()
-            msg.setup = ByteArray(8)
-            bb.get(msg.setup)
+
+            val bytes = ByteArray(8)
+            bb.get(bytes)
+            msg.setup = UsbControlSetup(bytes)
 
             if (msg.direction == USBIP_DIR_OUT) {
                 msg.outData = ByteArray(msg.transferBufferLength)
@@ -64,6 +66,41 @@ class UsbIpSubmitUrb(header: ByteArray) : UsbIpBasicPacket(header) {
             }
 
             return msg
+        }
+    }
+
+    class UsbControlSetup(bytes: ByteArray) {
+        private val _requestType: Byte
+        private val _request: Byte
+        private val _value: Short
+        private val _index: Short
+        private val _length: Short
+
+        val requestType: Int get() = _requestType.toInt() and 0xFF
+        val request: Int get() = _request.toInt() and 0xFF
+        val value: Int get() = _value.toInt() and 0xFFFF
+        val index: Int get() = _index.toInt() and 0xFFFF
+        val length: Int get() = _length.toInt() and 0xFFFF
+
+        init {
+            require(bytes.size == 8) { "Setup packet must be 8 bytes long" }
+
+            val bb = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+            _requestType = bb.get()
+            _request = bb.get()
+            _value = bb.getShort()
+            _index = bb.getShort()
+            _length = bb.getShort()
+        }
+
+        override fun toString(): String {
+            return """ [
+                requestType=${intToHex(requestType)},
+                request=${intToHex(request)},
+                value=${intToHex(value)},
+                index=${intToHex(index)},
+                length=$length
+                ]"""
         }
     }
 }
