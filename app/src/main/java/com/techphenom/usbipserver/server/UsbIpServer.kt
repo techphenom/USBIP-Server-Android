@@ -23,7 +23,6 @@ import com.techphenom.usbipserver.server.protocol.usb.UsbControlHelper
 import com.techphenom.usbipserver.server.protocol.usb.UsbDeviceDescriptor
 import com.techphenom.usbipserver.server.protocol.usb.UsbIpDevice
 import com.techphenom.usbipserver.server.protocol.usb.UsbIpInterface
-import com.techphenom.usbipserver.server.protocol.usb.doBulkTransferInChunks
 import com.techphenom.usbipserver.server.protocol.utils.*
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineName
@@ -437,10 +436,9 @@ class UsbIpServer(
             }
             USB_ENDPOINT_XFER_BULK -> {
                 Logger.i("submitUrbRequest", "Bulk Transfer ${buff.array().size} bytes ${if (msg.direction == UsbIpBasicPacket.USBIP_DIR_IN) "in" else "out"} on EP ${targetEndpoint?.endpointNumber}")
-                res = doBulkTransferInChunks(
-                    usbLib,
-                    context.devConn,
-                    targetEndpoint!!,
+                res = usbLib.doBulkTransfer(
+                    context.devConn.fileDescriptor,
+                    targetEndpoint!!.address,
                     buff.array(),
                     300
                 )
