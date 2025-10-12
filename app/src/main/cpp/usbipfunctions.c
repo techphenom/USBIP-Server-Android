@@ -149,8 +149,6 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doBulkTransfer(JNIEnv
     libusb_device_handle *dev_handle = NULL;
     int r;
     jint result_status = -EIO;
-    unsigned char *native_buffer = NULL;
-    int actual_length_transferred = 0;
 
     if (g_ctx == NULL) {
         __android_log_print(ANDROID_LOG_ERROR, APPNAME, "Bulk: Libusb context not initialized! Call init() first.");
@@ -163,52 +161,60 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doBulkTransfer(JNIEnv
         return libusb_to_errno(r);
     }
 
-    jsize dataLen = data ? (*env)->GetArrayLength(env, data) : 0;
+    jsize total_length = (*env)->GetArrayLength(env, data);
+    jbyte *native_buffer = (*env)->GetPrimitiveArrayCritical(env, data, NULL);
+    if (native_buffer == NULL) {
+        __android_log_print(ANDROID_LOG_ERROR, APPNAME, "BulkChunks: GetPrimitiveArrayCritical failed");
+        libusb_close(dev_handle);
+        return -ENOMEM;
+    }
 
-    if (dataLen > 0) {
-        native_buffer = (unsigned char *) (*env)->GetPrimitiveArrayCritical(env, data, NULL);
-        if (native_buffer == NULL) {
-            __android_log_print(ANDROID_LOG_ERROR, APPNAME, "Bulk: GetPrimitiveArrayCritical failed for ep 0x%02X", endpoint);
-            result_status = -ENOMEM;
+    const int CHUNK_SIZE = 16 * 1024; // 16 KB
+    int total_bytes_transferred = 0;
+    int offset = 0;
+
+    while (offset < total_length) { // Do Bulk Transfers in chunks of 16KB
+        int remaining = total_length - offset;
+        int current_chunk_size = (remaining < CHUNK_SIZE) ? remaining : CHUNK_SIZE;
+        int actual_length_transferred = 0;
+
+        unsigned char *current_chunk_ptr = (unsigned char *)native_buffer + offset;
+
+        r = libusb_bulk_transfer(dev_handle,
+                                 (unsigned char) endpoint,
+                                 current_chunk_ptr,
+                                 current_chunk_size,
+                                 &actual_length_transferred,
+                                 (unsigned int) timeout);
+
+        if (r < 0) {
+            result_status = libusb_to_errno(r);
+            if (r == LIBUSB_ERROR_TIMEOUT) {
+                __android_log_print(ANDROID_LOG_WARN, APPNAME, "BulkChunks: Transfer timed out at offset %d", offset);
+            } else {
+                __android_log_print(ANDROID_LOG_ERROR, APPNAME, "BulkChunks: Transfer failed at offset %d with error: %s", offset, libusb_error_name(r));
+            }
+            if(total_bytes_transferred > 0) { // Just send what we have so far
+                result_status = total_bytes_transferred;
+            }
             goto cleanup;
         }
-    }
 
-    r = libusb_bulk_transfer(dev_handle,
-                             (unsigned char) endpoint,
-                             native_buffer,
-                             dataLen,
-                             &actual_length_transferred,
-                             (unsigned int) timeout);
+        total_bytes_transferred += actual_length_transferred;
+        offset += actual_length_transferred;
 
-    if (r == LIBUSB_SUCCESS) {
-        result_status = actual_length_transferred;
-    } else {
-        if (r == LIBUSB_ERROR_TIMEOUT) {
-            __android_log_print(ANDROID_LOG_WARN, APPNAME, "Bulk: libusb_bulk_transfer timed out for ep 0x%02X", endpoint);
-            result_status = -ETIMEDOUT;
-        } else if (r == LIBUSB_ERROR_PIPE) {
-            __android_log_print(ANDROID_LOG_WARN, APPNAME, "Bulk: libusb_bulk_transfer STALL (pipe error) for ep 0x%02X", endpoint);
-            result_status = -EPIPE;
-        } else {
-            __android_log_print(ANDROID_LOG_ERROR, APPNAME, "Bulk: libusb_bulk_transfer failed for ep 0x%02X: %s (code %d)", endpoint, libusb_error_name(r), r);
-            result_status = libusb_to_errno(r);
+        if (actual_length_transferred < current_chunk_size) {
+            break; // Short transfer, assuming end of data
         }
     }
 
-    if (native_buffer != NULL) {
-        int release_mode = JNI_ABORT;
-        if ((endpoint & LIBUSB_ENDPOINT_IN) && r == LIBUSB_SUCCESS) {
-            release_mode = 0;
-        }
-        (*env)->ReleasePrimitiveArrayCritical(env, data, native_buffer, release_mode);
-        native_buffer = NULL;
-    }
+    result_status = total_bytes_transferred;
 
-    cleanup:
-    if (dev_handle != NULL) {
-        libusb_close(dev_handle);
-    }
+cleanup:
+    ;
+    int release_mode = (endpoint & LIBUSB_ENDPOINT_IN) ? 0 : JNI_ABORT;
+    (*env)->ReleasePrimitiveArrayCritical(env, data, native_buffer, release_mode);
+    libusb_close(dev_handle);
 
     return result_status;
 }
