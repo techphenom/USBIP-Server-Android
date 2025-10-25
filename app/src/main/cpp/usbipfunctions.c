@@ -292,3 +292,125 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doInterruptTransfer(J
 
     return result_status;
 }
+
+static void LIBUSB_CALL
+isochronous_transfer_callback(struct libusb_transfer *transfer) {
+    volatile int *completed = transfer->user_data;
+    *completed = 1;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doIsochronousTransfer(JNIEnv *env,
+                                                                                 jobject thiz,
+                                                                                 jint fd,
+                                                                                 jint endpoint,
+                                                                                 jbyteArray data,
+                                                                                 jintArray iso_packet_lengths) {
+    libusb_device_handle *dev_handle = NULL;
+    struct libusb_transfer *transfer = NULL;
+    int r;
+    jint result_status = -EIO;
+    unsigned char *native_buffer = NULL;
+    jint *native_packet_lengths = NULL;
+    int data_release_mode = JNI_ABORT;
+    int packet_release_mode = JNI_ABORT;
+    volatile int completed_flag = 0;
+
+    if (g_ctx == NULL) {
+        __android_log_print(ANDROID_LOG_ERROR, APPNAME, "Iso: Libusb context not initialized! Call init() first.");
+        return -EFAULT;
+    }
+
+    r = libusb_wrap_sys_device(g_ctx, (intptr_t)fd, &dev_handle);
+    if (r < 0 || dev_handle == NULL) {
+        __android_log_print(ANDROID_LOG_ERROR, APPNAME, "Iso: libusb_wrap_sys_device for fd %d failed: %s", fd, libusb_error_name(r));
+        result_status = libusb_to_errno(r);
+        goto cleanup_handle;
+    }
+
+    jsize num_packets = (*env)->GetArrayLength(env, iso_packet_lengths);
+    jsize total_length = (*env)->GetArrayLength(env, data);
+
+    transfer = libusb_alloc_transfer(num_packets);
+    if (!transfer) {
+        __android_log_print(ANDROID_LOG_ERROR, APPNAME, "Iso: libusb_alloc_transfer failed");
+        result_status = -ENOMEM;
+        goto cleanup_handle;
+    }
+
+    native_buffer = (unsigned char *)(*env)->GetPrimitiveArrayCritical(env, data, NULL);
+    if (native_buffer == NULL) {
+        __android_log_print(ANDROID_LOG_ERROR, APPNAME, "Iso: GetPrimitiveArrayCritical for data failed");
+        result_status = -ENOMEM;
+        goto cleanup_transfer;
+    }
+
+    native_packet_lengths = (*env)->GetIntArrayElements(env, iso_packet_lengths, NULL);
+    if (native_packet_lengths == NULL) {
+        __android_log_print(ANDROID_LOG_ERROR, APPNAME, "Iso: GetIntArrayElements for packets failed");
+        result_status = -ENOMEM;
+        goto cleanup_arrays;
+    }
+
+    libusb_fill_iso_transfer(transfer, dev_handle, (unsigned char)endpoint, native_buffer, total_length,
+                             num_packets, isochronous_transfer_callback, (void *)&completed_flag, 0);
+
+    for (int i = 0; i < num_packets; i++) {
+        transfer->iso_packet_desc[i].length = native_packet_lengths[i];
+    }
+
+    r = libusb_submit_transfer(transfer);
+    if (r < 0) {
+        __android_log_print(ANDROID_LOG_ERROR, APPNAME, "Iso: libusb_submit_transfer failed: %s", libusb_error_name(r));
+        result_status = libusb_to_errno(r);
+    } else {
+        while (completed_flag == 0) {
+            r = libusb_handle_events_completed(g_ctx, (int*)&completed_flag);
+            if (r < 0) {
+                if (r == LIBUSB_ERROR_INTERRUPTED) continue; // Loop again if interrupted
+                __android_log_print(ANDROID_LOG_ERROR, APPNAME, "Iso: libusb_handle_events failed: %s", libusb_error_name(r));
+                libusb_cancel_transfer(transfer); // Attempt to cancel before breaking
+                break;
+            }
+        }
+    }
+
+    if (transfer->status == LIBUSB_TRANSFER_COMPLETED) {
+        int total_actual_length = 0;
+        // For IN, update the Java array with the actual lengths received for each packet.
+        if (endpoint & LIBUSB_ENDPOINT_IN) {
+            for (int i = 0; i < num_packets; i++) {
+                native_packet_lengths[i] = (jint)transfer->iso_packet_desc[i].actual_length;
+                total_actual_length += (jint)transfer->iso_packet_desc[i].actual_length;
+            }
+        } else { // For OUT, just use the total actual_length.
+            total_actual_length = (jint)transfer->actual_length;
+        }
+        result_status = total_actual_length;
+    } else {
+        __android_log_print(ANDROID_LOG_WARN, APPNAME, "Iso: Transfer completed with status: %s", libusb_error_name(transfer->status));
+        result_status = libusb_to_errno(transfer->status);
+    }
+
+
+    if ((endpoint & LIBUSB_ENDPOINT_IN) && result_status >= 0) {
+        data_release_mode = 0; // Copy back buffer changes on success
+        packet_release_mode = 0; // Copy back packet length changes on success
+    }
+    (*env)->ReleaseIntArrayElements(env, iso_packet_lengths, native_packet_lengths, packet_release_mode);
+    native_packet_lengths = NULL;
+
+cleanup_arrays:
+    (*env)->ReleasePrimitiveArrayCritical(env, data, native_buffer, data_release_mode);
+    native_buffer = NULL;
+
+cleanup_transfer:
+    libusb_free_transfer(transfer);
+
+cleanup_handle:
+    if (dev_handle != NULL) {
+        libusb_close(dev_handle);
+    }
+
+    return result_status;
+}

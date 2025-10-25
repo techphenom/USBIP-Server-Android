@@ -34,4 +34,11 @@ class UsbLib {
         timeout: Int
     ): Int
 
+    external fun doIsochronousTransfer(
+        fd: Int,
+        endpoint: Int,
+        data: ByteArray?,
+        isoPacketLengths: IntArray
+    ): Int
+
 }
