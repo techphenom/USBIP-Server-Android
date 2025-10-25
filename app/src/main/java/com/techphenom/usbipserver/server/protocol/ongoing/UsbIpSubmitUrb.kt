@@ -13,6 +13,7 @@ class UsbIpSubmitUrb(header: ByteArray) : UsbIpBasicPacket(header) {
     var startFrame = 0
     var numberOfPackets = 0
     var interval = 0
+    var isoPacketDescriptors: List<UsbIpIsoPacketDescriptor> = emptyList()
 
     lateinit var setup: UsbControlSetup
     var outData: ByteArray = ByteArray(0)
@@ -58,13 +59,22 @@ class UsbIpSubmitUrb(header: ByteArray) : UsbIpBasicPacket(header) {
                 convertInputStreamToByteArray(incoming, msg.outData)
             }
 
-            // read the iso_packet_descriptor even tho we don't use for now
-            val totalIsoDescriptorAreaSize = msg.numberOfPackets * 16
+            val totalIsoDescriptorAreaSize = msg.numberOfPackets * UsbIpIsoPacketDescriptor.WIRE_SIZE
             if(totalIsoDescriptorAreaSize > 0) {
                 val allIsoDescriptorsBytes = ByteArray(totalIsoDescriptorAreaSize)
                 convertInputStreamToByteArray(incoming, allIsoDescriptorsBytes)
-            }
+                val isoBuff = ByteBuffer.wrap(allIsoDescriptorsBytes).order(ByteOrder.BIG_ENDIAN)
+                val descriptors = ArrayList<UsbIpIsoPacketDescriptor>(msg.numberOfPackets)
 
+                for (i in 0 until msg.numberOfPackets) {
+                    val offset = isoBuff.getInt()
+                    val length = isoBuff.getInt()
+                    val actualLength = isoBuff.getInt()
+                    val status = isoBuff.getInt()
+                    descriptors.add(UsbIpIsoPacketDescriptor(offset, length, actualLength, status))
+                }
+                msg.isoPacketDescriptors = descriptors
+            }
             return msg
         }
     }

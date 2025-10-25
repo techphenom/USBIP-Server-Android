@@ -1,6 +1,5 @@
 package com.techphenom.usbipserver.server.protocol.ongoing
 
-import com.techphenom.usbipserver.server.protocol.utils.Logger
 import com.techphenom.usbipserver.server.protocol.utils.convertInputStreamToByteArray
 import java.io.IOException
 import java.io.InputStream
@@ -76,17 +75,25 @@ abstract class UsbIpBasicPacket {
         const val USBIP_HEADER_SIZE = 48
 
         @Throws(IOException::class)
-        fun read(incoming: InputStream): UsbIpBasicPacket? {
+        fun read(incoming: InputStream): UsbIpBasicPacket {
             val bb = ByteBuffer.allocate(20)
             convertInputStreamToByteArray(incoming, bb.array())
             return when (val command = bb.getInt()) {
                 USBIP_CMD_SUBMIT -> UsbIpSubmitUrb.read(bb.array(), incoming)
                 USBIP_CMD_UNLINK -> UsbIpUnlinkUrb.read(bb.array(), incoming)
-                else -> {
-                    Logger.e("UsbIpServerDebug", "Unknown command: $command")
-                    null
-                }
+                else -> throw IOException("Unknown incoming packet command: $command")
             }
+        }
+    }
+
+    data class UsbIpIsoPacketDescriptor(
+        val offset: Int,
+        val length: Int,
+        val actualLength: Int,
+        val status: Int
+    ) {
+        companion object {
+            const val WIRE_SIZE = 16
         }
     }
 }
