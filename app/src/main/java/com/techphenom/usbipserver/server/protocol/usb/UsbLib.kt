@@ -6,7 +6,7 @@ class UsbLib {
         System.loadLibrary("usbipfunctions")
     }
 
-    external fun init(): Int
+    external fun init(debug: Boolean): Int
     external fun exit()
 
     external fun doControlTransfer(

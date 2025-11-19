@@ -59,10 +59,10 @@ class UsbControlHelper {
                     if (config.id == value) {
                         // If we have a current config, we need unclaim all interfaces to allow the
                         // configuration change to work properly.
-                        if (context.activeConfiguration != null) {
-                            Logger.i(TAG, "Unclaiming all interfaces from old configuration: " + context.activeConfiguration!!.id)
-                            for (j in 0..<context.activeConfiguration!!.interfaceCount) {
-                                val iface: UsbInterface? = context.activeConfiguration!!.getInterface(j)
+                        if (context.activeConfig != null) {
+                            Logger.i(TAG,"Unclaiming all interfaces from old config: " + context.activeConfig!!.id)
+                            for (j in 0..<context.activeConfig!!.interfaceCount) {
+                                val iface: UsbInterface? = context.activeConfig!!.getInterface(j)
                                 context.devConn.releaseInterface(iface)
                             }
                         }
@@ -74,29 +74,17 @@ class UsbControlHelper {
                             Logger.e(TAG, "Failed to set configuration! Proceeding anyway!")
                         }
 
-                        // This is now the active configuration
-                        context.activeConfiguration = config
+                        context.activeConfig = config // This is now the active configuration
+                        buildEndpointCache(context)
 
-                        // Construct the cache of endpoint mappings
-                        context.activeConfigurationEndpointsByNumDir = SparseArray<UsbEndpoint>()
-                        for (j in 0..<context.activeConfiguration!!.interfaceCount) {
-                            val iface = context.activeConfiguration!!.getInterface(j)
-                            for (k in 0..<iface.endpointCount) {
-                                val endp = iface.getEndpoint(k)
-                                context.activeConfigurationEndpointsByNumDir?.put(
-                                    endp.direction or endp.endpointNumber,
-                                    endp
-                                )
-                            }
-                        }
-
-                        Logger.i(TAG,"Claiming all interfaces from new configuration: " + context.activeConfiguration!!.id)
-                        for (j in 0..<context.activeConfiguration!!.interfaceCount) {
-                            val iface = context.activeConfiguration!!.getInterface(j)
+                        Logger.i(TAG,"Claiming all interfaces from new configuration: " + context.activeConfig!!.id)
+                        for (j in 0..<context.activeConfig!!.interfaceCount) {
+                            val iface = context.activeConfig!!.getInterface(j)
                             if (!context.devConn.claimInterface(iface, true)) {
                                 Logger.e(TAG,"Unable to claim interface: ${iface.id}")
                             }
                         }
+
                         return true
                     }
                 }
@@ -105,23 +93,66 @@ class UsbControlHelper {
             } else if (requestType == SET_INTERFACE_REQUEST_TYPE && request == SET_INTERFACE_REQUEST) {
                 Logger.i(TAG, "Handling SET_INTERFACE via Android API")
 
-                if (context.activeConfiguration != null) {
-                    for (i in 0..<context.activeConfiguration!!.interfaceCount) {
-                        val iface = context.activeConfiguration!!.getInterface(i)
-                        if (iface.id == index && iface.alternateSetting == value) {
-                            if (!context.devConn.setInterface(iface)) {
-                                Logger.e(TAG, "Unable to set interface: ${iface.id}")
-                            }
-                            return true
-                        }
-                    }
-                    Logger.e(TAG, "SET_INTERFACE specified invalid interface: $index, $value")
-                } else {
+                if (context.activeConfig == null) {
                     Logger.e(TAG, "Attempted to use SET_INTERFACE before SET_CONFIGURATION!")
+                    return false
                 }
+
+                val currentInterface = context.activeConfig?.findInterface(index)
+                if (currentInterface == null) {
+                    Logger.e(TAG, "SET_INTERFACE failed: could not find an existing interface with ID #$index")
+                    return false
+                }
+
+                val targetInterface = context.activeConfig?.findInterface(index, value)
+                if (targetInterface == null) {
+                    Logger.e(TAG, "SET_INTERFACE specified invalid interface/alternate setting: #$index/$value")
+                    return false
+                }
+
+                Logger.i(TAG, "Releasing claim on current interface #${currentInterface.id}")
+                context.devConn.releaseInterface(currentInterface)
+
+                if (!context.devConn.setInterface(targetInterface)) {
+                    Logger.e(TAG, "Unable to set interface: ${targetInterface.id}. Restoring old claim.")
+                    context.devConn.claimInterface(currentInterface, true)
+                    return false
+                }
+
+                if (!context.devConn.claimInterface(targetInterface, true)) {
+                    Logger.e(TAG, "Critical error: Set interface but failed to claim it: ${targetInterface.id}")
+                }
+
+                buildEndpointCache(context)
+
+                return true
             }
 
             return false
+        }
+
+        fun buildEndpointCache(context: AttachedDeviceContext) {
+            context.activeConfigEndpointCache = SparseArray<UsbEndpoint>()
+            for (j in 0..<context.activeConfig!!.interfaceCount) {
+                val iface = context.activeConfig!!.getInterface(j)
+                for (k in 0..<iface.endpointCount) {
+                    val ep = iface.getEndpoint(k)
+                    context.activeConfigEndpointCache?.put(
+                        ep.direction or ep.endpointNumber,
+                        ep
+                    )
+                }
+            }
+        }
+
+        private fun android.hardware.usb.UsbConfiguration.findInterface(id: Int, alternateSetting: Int? = null): UsbInterface? {
+            for (i in 0..<this.interfaceCount) {
+                val iface = this.getInterface(i)
+                if (iface.id == id && (alternateSetting == null || iface.alternateSetting == alternateSetting)) {
+                    return iface
+                }
+            }
+            return null
         }
     }
 }

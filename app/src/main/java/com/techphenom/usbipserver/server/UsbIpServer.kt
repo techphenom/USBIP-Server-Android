@@ -6,6 +6,7 @@ import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
+import com.techphenom.usbipserver.BuildConfig
 import com.techphenom.usbipserver.UsbIpEvent
 import com.techphenom.usbipserver.data.UsbIpRepository
 import com.techphenom.usbipserver.server.protocol.ProtocolCodes
@@ -37,11 +38,15 @@ import kotlinx.coroutines.sync.withLock
 import java.io.IOException
 import java.net.ServerSocket
 import java.net.Socket
-import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentHashMap
 import com.techphenom.usbipserver.server.UsbIpDeviceConstants.UsbIpDeviceState.*
 import com.techphenom.usbipserver.server.protocol.usb.UsbLib
+import kotlinx.coroutines.ExecutorCoroutineDispatcher
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import java.util.concurrent.Executors
 
 class UsbIpServer(
     private val repository: UsbIpRepository,
@@ -51,9 +56,10 @@ class UsbIpServer(
 
     private lateinit var serverSocket: ServerSocket
     private lateinit var serverScope: CoroutineScope
+    private lateinit var interruptDispatcher: ExecutorCoroutineDispatcher
+    private lateinit var isoDispatcher: ExecutorCoroutineDispatcher
     private val usbLib = UsbLib()
     private val attachedDevices = ConcurrentHashMap<Socket, AttachedDeviceContext>()
-
 
     companion object {
         private const val FLAG_POSSIBLE_SPEED_LOW = 0x01
@@ -67,7 +73,10 @@ class UsbIpServer(
         val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
             Logger.e("start()" , "$throwable")
         }
-        if(usbLib.init() < 0) throw IOException("Unable to initialize libusb")
+        if(usbLib.init(BuildConfig.DEBUG) < 0) throw IOException("Unable to initialize libusb")
+
+        interruptDispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+        isoDispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
 
         serverScope = CoroutineScope(Dispatchers.IO + exceptionHandler)
         serverScope.launch {
@@ -96,6 +105,8 @@ class UsbIpServer(
             serverSocket.close()
         }
         usbLib.exit()
+        interruptDispatcher.close()
+        isoDispatcher.close()
     }
 
     fun getAttachedDeviceCount(): Int {
@@ -129,21 +140,51 @@ class UsbIpServer(
 
     @Throws(IOException::class)
     private suspend fun handleOngoingRequest(s: Socket, clientJobScope: CoroutineScope): Boolean {
-        val inMsg: UsbIpBasicPacket? = UsbIpBasicPacket.read(s.getInputStream())
-
+        val inMsg: UsbIpBasicPacket = UsbIpBasicPacket.read(s.getInputStream())
         Logger.i("handleOngoingRequest", "$inMsg")
 
-        when (inMsg?.command) {
+        val context: AttachedDeviceContext? = attachedDevices[s]
+        if (context == null) throw IOException("Client requested non-attached device")
+        
+        var targetEndpoint: UsbEndpoint? = null
+        val epType = if(inMsg.ep == 0) USB_ENDPOINT_XFER_CONTROL
+        else {
+            val endpoints = context.activeConfigEndpointCache
+            if (endpoints != null) {
+                val endpointNum = inMsg.ep + (if (inMsg.direction == UsbIpBasicPacket.USBIP_DIR_IN) USB_DIR_IN else 0)
+                targetEndpoint = endpoints.get(endpointNum)
+                targetEndpoint?.type
+            } else null
+        }
+
+        val dispatcher = when(epType) {
+            USB_ENDPOINT_XFER_INT -> interruptDispatcher
+            USB_ENDPOINT_XFER_ISOC -> isoDispatcher
+            USB_ENDPOINT_XFER_CONTROL -> clientJobScope.coroutineContext
+            else -> Dispatchers.IO
+        }
+
+        when (inMsg.command) {
             UsbIpBasicPacket.USBIP_CMD_SUBMIT -> {
-                clientJobScope.launch(Dispatchers.IO + CoroutineName("URB-${inMsg.seqNum}")) {
-                    submitUrbRequest(s, inMsg as UsbIpSubmitUrb)
+                clientJobScope.launch(dispatcher + CoroutineName("URB-${inMsg.seqNum}")) {
+                    context.activeJobsMutex.withLock {
+                        context.activeJobs[inMsg.seqNum] = this.coroutineContext[Job]!!
+                    }
+                    try {
+                        submitUrbRequest(s, inMsg as UsbIpSubmitUrb, context, epType, targetEndpoint)
+                    } finally {
+                        context.activeJobsMutex.withLock {
+                            context.activeJobs.remove(inMsg.seqNum)
+                        }
+                    }
                 }
             }
-            UsbIpBasicPacket.USBIP_CMD_UNLINK -> abortUrbRequest(s, inMsg as UsbIpUnlinkUrb)
-            else -> {
-                Logger.e("handleOngoingRequest", "Unknown Command: ${inMsg?.command}")
-                return false
+            UsbIpBasicPacket.USBIP_CMD_UNLINK -> {
+                clientJobScope.launch(Dispatchers.IO + CoroutineName("Unlink-${inMsg.seqNum}")) {
+                    abortUrbRequest(s, inMsg as UsbIpUnlinkUrb)
+                }
             }
+            else -> throw IOException("Unknown incoming packet command: ${inMsg.command}")
         }
 
         return true
@@ -234,11 +275,12 @@ class UsbIpServer(
         info.interfaces = arrayOfNulls(ipDev.bNumInterfaces.toInt())
 
         for (i in 0 until ipDev.bNumInterfaces) {
-            info.interfaces[i] = UsbIpInterface()
-            val iface: UsbInterface = device.getInterface(i)
-            info.interfaces[i]!!.bInterfaceClass = iface.interfaceClass.toByte()
-            info.interfaces[i]!!.bInterfaceSubClass = iface.interfaceSubclass.toByte()
-            info.interfaces[i]!!.bInterfaceProtocol = iface.interfaceProtocol.toByte()
+            val newInterface = UsbIpInterface()
+            info.interfaces[i] = newInterface
+            val usbInterface: UsbInterface = device.getInterface(i)
+            newInterface.bInterfaceClass = usbInterface.interfaceClass.toByte()
+            newInterface.bInterfaceSubClass = usbInterface.interfaceSubclass.toByte()
+            newInterface.bInterfaceProtocol = usbInterface.interfaceProtocol.toByte()
         }
 
         var devDesc: UsbDeviceDescriptor? = null
@@ -261,9 +303,9 @@ class UsbIpServer(
                 FLAG_POSSIBLE_SPEED_HIGH or FLAG_POSSIBLE_SPEED_SUPER
 
         for (i in 0 until dev.interfaceCount) {
-            val iface = dev.getInterface(i)
-            for (j in 0 until iface.endpointCount) {
-                val endpoint: UsbEndpoint = iface.getEndpoint(j)
+            val usbInterface = dev.getInterface(i)
+            for (j in 0 until usbInterface.endpointCount) {
+                val endpoint: UsbEndpoint = usbInterface.getEndpoint(j)
                 if (endpoint.type == USB_ENDPOINT_XFER_BULK || endpoint.type == USB_ENDPOINT_XFER_ISOC) {
                     // Low speed devices can't implement bulk or iso endpoints
                     possibleSpeeds = possibleSpeeds and FLAG_POSSIBLE_SPEED_LOW.inv()
@@ -377,87 +419,120 @@ class UsbIpServer(
         return buildUsbDeviceInfo(dev, context)
     }
 
-    private suspend fun submitUrbRequest(s: Socket, msg: UsbIpSubmitUrb) {
+    private suspend fun submitUrbRequest(
+        s: Socket,
+        msg: UsbIpSubmitUrb,
+        context: AttachedDeviceContext,
+        endpointType: Int?,
+        targetEndpoint: UsbEndpoint?
+    ) {
         val reply = UsbIpSubmitUrbReply(msg.seqNum,0,0, 0)
         val deviceId: Int = devIdToDeviceId(msg.devId)
-        val context: AttachedDeviceContext? = attachedDevices.get(s)
 
-        if (context == null) throw IOException("Client requested non-attached device")
-
-        var targetEndpoint: UsbEndpoint? = null
-        val endpointType =
-            if(msg.ep == 0) USB_ENDPOINT_XFER_CONTROL
-            else {
-                if (context.activeConfigurationEndpointsByNumDir != null) {
-                    val endptNumDir = msg.ep + (if (msg.direction == UsbIpBasicPacket.USBIP_DIR_IN) USB_DIR_IN else 0)
-                    targetEndpoint = context.activeConfigurationEndpointsByNumDir!!.get(endptNumDir)
-                    targetEndpoint?.type
-                } else null
-            }
-
-        context.activeMessagesMutex.withLock { // This message is now active
-            context.activeMessages.add(msg.seqNum)
-        }
-
-        val buff: ByteBuffer = if (msg.direction == UsbIpBasicPacket.USBIP_DIR_IN) {
-            ByteBuffer.allocate(msg.transferBufferLength) // The buffer is allocated by us
+        val transferBuff = if (msg.direction == UsbIpBasicPacket.USBIP_DIR_IN) {
+            // For IN, allocate a new buffer and assign it to the reply.
+            ByteArray(msg.transferBufferLength).also { reply.inData = it }
         } else {
-            ByteBuffer.wrap(msg.outData) // The buffer came in with the request
-        }
-        if (msg.direction == UsbIpBasicPacket.USBIP_DIR_IN) {
-            reply.inData = buff.array() // We need to store our buffer in the URB reply
+            msg.outData // For OUT, use the data that came with the request.
         }
 
         var res: Int
+        val seqNum: String = msg.seqNum.toString()
         when (endpointType) {
             null -> {
                 Logger.e("submitUrbRequest", "EP not found: " + msg.ep)
                 res = ProtocolCodes.STATUS_NA
             }
             USB_ENDPOINT_XFER_CONTROL -> {
-                Logger.i("submitUrbRequest","doControlTransfer - SETUP: ${msg.setup}")
-                res = with(msg.setup) {
-                    if(!UsbControlHelper.handleInternalControlTransfer(context, requestType, request, value,index )) {
-                        usbLib.doControlTransfer(
-                            context.devConn.fileDescriptor,
-                            requestType.toByte(),
-                            request.toByte(),
-                            value.toShort(),
-                            index.toShort(),
-                            buff.array(),
-                            length,
-                            300
-                        )
-                    } else 0
+                repeat(AttachedDeviceContext.MAX_CONCURRENT_TRANSFERS) {
+                    context.transferSemaphore.acquire()
                 }
-                if (res < 0 && res != -110) { // Don't print for ETIMEDOUT
-                    Logger.e("submitUrbRequest","controlTransfer failed: $res")
-                } else Logger.i("submitUrbRequest", "controlTransfer result code: $res")
+                Logger.i("submitUrbRequest","CONTROL: $seqNum - Started")
+                try {
+                    res = with(msg.setup) {
+                        if(!UsbControlHelper.handleInternalControlTransfer(context, requestType, request, value,index)) {
+                            usbLib.doControlTransfer(
+                                context.devConn.fileDescriptor,
+                                requestType.toByte(),
+                                request.toByte(),
+                                value.toShort(),
+                                index.toShort(),
+                                transferBuff,
+                                length,
+                                300
+                            )
+                        } else 0
+                    }
+                } finally {
+                    repeat(AttachedDeviceContext.MAX_CONCURRENT_TRANSFERS) {
+                        context.transferSemaphore.release()
+                    }
+                }
+                Logger.i("submitUrbRequest", "CONTROL: $seqNum - Complete with $res bytes (wanted ${msg.transferBufferLength})")
             }
             USB_ENDPOINT_XFER_BULK -> {
-                Logger.i("submitUrbRequest", "Bulk Transfer ${buff.array().size} bytes ${if (msg.direction == UsbIpBasicPacket.USBIP_DIR_IN) "in" else "out"} on EP ${targetEndpoint?.endpointNumber}")
-                res = usbLib.doBulkTransfer(
-                    context.devConn.fileDescriptor,
-                    targetEndpoint!!.address,
-                    buff.array(),
-                    300
-                )
-                Logger.i("submitUrbRequest", "Bulk Transfer complete with $res bytes (wanted ${msg.transferBufferLength})")
+                context.transferSemaphore.acquire()
+                Logger.i("submitUrbRequest", "BULK: $seqNum - ${transferBuff.size} bytes ${if (msg.direction == UsbIpBasicPacket.USBIP_DIR_IN) "in" else "out"} on EP ${targetEndpoint?.endpointNumber}")
+                try {
+                    res = usbLib.doBulkTransfer(
+                        context.devConn.fileDescriptor,
+                        targetEndpoint!!.address,
+                        transferBuff,
+                        300
+                    )
+                } finally {
+                    context.transferSemaphore.release()
+                }
+                Logger.i("submitUrbRequest", "BULK: $seqNum - Complete with $res bytes (wanted ${msg.transferBufferLength})")
             }
             USB_ENDPOINT_XFER_INT -> {
-                Logger.i("submitUrbRequest","Interrupt transfer ${msg.transferBufferLength} bytes ${if (msg.direction == UsbIpBasicPacket.USBIP_DIR_IN) "in" else "out"} on EP ${targetEndpoint?.endpointNumber}")
-                res = usbLib.doInterruptTransfer(
-                    context.devConn.fileDescriptor,
-                    targetEndpoint!!.address,
-                    buff.array(),
-                    100
-                )
-                Logger.i("submitUrbRequest", "Interrupt transfer complete with $res bytes (wanted ${msg.transferBufferLength})")
+                context.transferSemaphore.acquire()
+                Logger.i("submitUrbRequest","INTERRUPT: $seqNum - ${msg.transferBufferLength} bytes ${if (msg.direction == UsbIpBasicPacket.USBIP_DIR_IN) "in" else "out"} on EP ${targetEndpoint?.endpointNumber}")
+                try {
+                    res = usbLib.doInterruptTransfer(
+                        context.devConn.fileDescriptor,
+                        targetEndpoint!!.address,
+                        transferBuff,
+                        100
+                    )
+                } finally {
+                    context.transferSemaphore.release()
+                }
+                Logger.i("submitUrbRequest", "INTERRUPT: $seqNum - Complete with $res bytes (wanted ${msg.transferBufferLength})")
             }
-            else -> throw IOException("Unsupported endpoint type: $endpointType")
+            USB_ENDPOINT_XFER_ISOC -> {
+                context.transferSemaphore.acquire()
+                Logger.i("submitUrbRequest", "ISO: ${msg.seqNum} - Started")
+                try {
+                    val isoPacketLengths = IntArray(msg.numberOfPackets) { i ->
+                        msg.isoPacketDescriptors[i].length
+                    }
+                    res = usbLib.doIsochronousTransfer(
+                        context.devConn.fileDescriptor,
+                        targetEndpoint!!.address,
+                        transferBuff,
+                        isoPacketLengths
+                    )
+                    reply.isoPacketDescriptors = msg.isoPacketDescriptors.toList()
+                    reply.numberOfPackets = msg.numberOfPackets
+                    reply.startFrame = msg.startFrame
+                    for (i in 0 until msg.numberOfPackets) {
+                        if (res >= 0){
+                            reply.isoPacketDescriptors[i].actualLength = isoPacketLengths[i]
+                            reply.isoPacketDescriptors[i].status = 0
+                        }
+                        else {
+                            reply.isoPacketDescriptors[i].actualLength = 0
+                            reply.isoPacketDescriptors[i].status = res
+                        }
+                    }
+                } finally {
+                    context.transferSemaphore.release()
+                }
+                Logger.i("submitUrbRequest", "ISO: $seqNum - Complete with $res bytes (wanted ${msg.transferBufferLength})")
+            }
+            else -> throw IOException("Unsupported endpoint type: $endpointType, seqNum: $seqNum")
         }
-
-        currentCoroutineContext().ensureActive()
 
         if (res < 0) { // If the request failed, check if the device is still around
             if (getDevice(deviceId) == null) {
@@ -469,9 +544,7 @@ class UsbIpServer(
             reply.status = ProtocolCodes.STATUS_OK
         }
 
-        context.activeMessagesMutex.withLock {
-            if(!context.activeMessages.remove(msg.seqNum)) return
-        }
+        currentCoroutineContext().ensureActive()
 
         context.socketWriteMutex.withLock {
             Logger.i("submitUrbRequest", "$reply")
@@ -481,14 +554,24 @@ class UsbIpServer(
 
     private suspend fun abortUrbRequest(s: Socket, msg: UsbIpUnlinkUrb) {
         val context: AttachedDeviceContext = attachedDevices.get(s) ?: return
-        var found = false
-        context.activeMessagesMutex.withLock {
-            if(context.activeMessages.remove(msg.seqNumToUnlink)){
-                found = true
+        var jobToCancel: Job? = null
+        for (i in 1..2) {
+            context.activeJobsMutex.withLock {
+                jobToCancel = context.activeJobs[msg.seqNumToUnlink]
+            }
+            if (jobToCancel != null) break
+            if (i < 2) delay(300)
+        }
+
+        if (jobToCancel != null) {
+            context.activeJobsMutex.withLock {
+                context.activeJobs.remove(msg.seqNumToUnlink)
             }
         }
+        jobToCancel?.cancel()
+
         val reply = UsbIpUnlinkUrbReply(msg.seqNum, msg.devId, msg.direction, msg.ep)
-        reply.status = if (found) UsbIpBasicPacket.USBIP_ECONNRESET else 0
+        reply.status = if (jobToCancel != null) UsbIpBasicPacket.USBIP_ECONNRESET else 0
         context.socketWriteMutex.withLock {
             Logger.i("abortUrbRequest", "$reply")
             s.getOutputStream().write(reply.serialize())

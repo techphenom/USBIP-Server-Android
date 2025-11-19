@@ -21,7 +21,7 @@ static int libusb_to_errno(int libusb_err) {
         case LIBUSB_ERROR_NO_DEVICE: return -ENODEV;
         case LIBUSB_ERROR_NOT_FOUND: return -ENOENT;
         case LIBUSB_ERROR_BUSY: return -EBUSY;
-        case LIBUSB_ERROR_TIMEOUT: return -ETIMEDOUT; // Important
+        case LIBUSB_ERROR_TIMEOUT: return -ETIMEDOUT;
         case LIBUSB_ERROR_OVERFLOW: return -EOVERFLOW;
         case LIBUSB_ERROR_PIPE: return -EPIPE; // STALL condition
         case LIBUSB_ERROR_INTERRUPTED: return -EINTR;
@@ -34,8 +34,22 @@ static int libusb_to_errno(int libusb_err) {
     }
 }
 
+static void log_cb(libusb_context *ctx, enum libusb_log_level level, const char *str) {
+    int priority = ANDROID_LOG_DEFAULT;
+    if (level == LIBUSB_LOG_LEVEL_ERROR) {
+        priority = ANDROID_LOG_ERROR;
+    } else if (level == LIBUSB_LOG_LEVEL_WARNING) {
+        priority = ANDROID_LOG_WARN;
+    } else if (level == LIBUSB_LOG_LEVEL_INFO) {
+        priority = ANDROID_LOG_INFO;
+    } else {
+        priority = ANDROID_LOG_DEBUG;
+    }
+    __android_log_print(priority, APPNAME, "log_cb: %s", str);
+}
+
 JNIEXPORT jint JNICALL
-Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_init(JNIEnv *env, jobject thiz) {
+Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_init(JNIEnv *env, jobject thiz, jboolean debug) {
     if (g_ctx != NULL) {
         __android_log_print(ANDROID_LOG_INFO, APPNAME, "Libusb context already initialized.");
         return 0;
@@ -47,6 +61,12 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_init(JNIEnv *env, job
         __android_log_print(ANDROID_LOG_ERROR, APPNAME, "libusb_init failed: %s", libusb_error_name(r));
         g_ctx = NULL;
         return libusb_to_errno(r);
+    }
+
+    if (debug) {
+        libusb_set_option(g_ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_DEBUG);
+        libusb_set_log_cb(g_ctx, log_cb, LIBUSB_LOG_CB_GLOBAL);
+        __android_log_print(ANDROID_LOG_INFO, APPNAME, "Libusb debug mode. Logging enabled.");
     }
 
     __android_log_print(ANDROID_LOG_INFO, APPNAME, "Libusb context initialized successfully.");
@@ -90,9 +110,9 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doControlTransfer(JNI
     }
 
     if (length > 0 && data != NULL) {
-        native_buffer = (unsigned char *) (*env)->GetPrimitiveArrayCritical(env, data, NULL);
+        native_buffer = (unsigned char *) (*env)->GetByteArrayElements(env, data, NULL);
         if (native_buffer == NULL) {
-            __android_log_print(ANDROID_LOG_ERROR, APPNAME, "Ctrl: GetPrimitiveArrayCritical failed for control transfer");
+            __android_log_print(ANDROID_LOG_ERROR, APPNAME, "Ctrl: GetByteArrayElements failed for control transfer");
             result_status = -ENOMEM;
             goto cleanup;
         }
@@ -127,7 +147,7 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doControlTransfer(JNI
         if ((request_type & LIBUSB_ENDPOINT_IN) && r >= 0) {
             release_mode = 0;
         }
-        (*env)->ReleasePrimitiveArrayCritical(env, data, native_buffer, release_mode);
+        (*env)->ReleaseByteArrayElements(env, data, (jbyte*)native_buffer, release_mode);
         native_buffer = NULL;
     }
 
@@ -162,9 +182,9 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doBulkTransfer(JNIEnv
     }
 
     jsize total_length = (*env)->GetArrayLength(env, data);
-    jbyte *native_buffer = (*env)->GetPrimitiveArrayCritical(env, data, NULL);
+    jbyte *native_buffer = (*env)->GetByteArrayElements(env, data, NULL);
     if (native_buffer == NULL) {
-        __android_log_print(ANDROID_LOG_ERROR, APPNAME, "BulkChunks: GetPrimitiveArrayCritical failed");
+        __android_log_print(ANDROID_LOG_ERROR, APPNAME, "BulkChunks: GetByteArrayElements failed");
         libusb_close(dev_handle);
         return -ENOMEM;
     }
@@ -213,7 +233,7 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doBulkTransfer(JNIEnv
 cleanup:
     ;
     int release_mode = (endpoint & LIBUSB_ENDPOINT_IN) ? 0 : JNI_ABORT;
-    (*env)->ReleasePrimitiveArrayCritical(env, data, native_buffer, release_mode);
+    (*env)->ReleaseByteArrayElements(env, data, (jbyte*)native_buffer, release_mode);
     libusb_close(dev_handle);
 
     return result_status;
@@ -246,9 +266,9 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doInterruptTransfer(J
 
     jsize dataLen = data ? (*env)->GetArrayLength(env, data) : 0;
     if (dataLen > 0) {
-        native_buffer = (unsigned char *) (*env)->GetPrimitiveArrayCritical(env, data, NULL);
+        native_buffer = (unsigned char *) (*env)->GetByteArrayElements(env, data, NULL);
         if (native_buffer == NULL) {
-            __android_log_print(ANDROID_LOG_ERROR, APPNAME, "Intr: GetPrimitiveArrayCritical failed for ep 0x%02X", endpoint);
+            __android_log_print(ANDROID_LOG_ERROR, APPNAME, "Intr: GetByteArrayElements failed for ep 0x%02X", endpoint);
             result_status = -ENOMEM;
             goto cleanup;
         }
@@ -281,7 +301,7 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doInterruptTransfer(J
         if ((endpoint & LIBUSB_ENDPOINT_IN) && r == LIBUSB_SUCCESS) {
             release_mode = 0;
         }
-        (*env)->ReleasePrimitiveArrayCritical(env, data, native_buffer, release_mode);
+        (*env)->ReleaseByteArrayElements(env, data, (jbyte*)native_buffer, release_mode);
         native_buffer = NULL;
     }
 
@@ -293,9 +313,8 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doInterruptTransfer(J
     return result_status;
 }
 
-static void LIBUSB_CALL
-isochronous_transfer_callback(struct libusb_transfer *transfer) {
-    volatile int *completed = transfer->user_data;
+void iso_transfer_cb(struct libusb_transfer *transfer) {
+    int *completed = transfer->user_data;
     *completed = 1;
 }
 
@@ -314,7 +333,7 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doIsochronousTransfer
     jint *native_packet_lengths = NULL;
     int data_release_mode = JNI_ABORT;
     int packet_release_mode = JNI_ABORT;
-    volatile int completed_flag = 0;
+    volatile int completed = 0;
 
     if (g_ctx == NULL) {
         __android_log_print(ANDROID_LOG_ERROR, APPNAME, "Iso: Libusb context not initialized! Call init() first.");
@@ -338,9 +357,8 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doIsochronousTransfer
         goto cleanup_handle;
     }
 
-    native_buffer = (unsigned char *)(*env)->GetPrimitiveArrayCritical(env, data, NULL);
+    native_buffer = (unsigned char *)(*env)->GetByteArrayElements(env, data, NULL);
     if (native_buffer == NULL) {
-        __android_log_print(ANDROID_LOG_ERROR, APPNAME, "Iso: GetPrimitiveArrayCritical for data failed");
         result_status = -ENOMEM;
         goto cleanup_transfer;
     }
@@ -353,7 +371,7 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doIsochronousTransfer
     }
 
     libusb_fill_iso_transfer(transfer, dev_handle, (unsigned char)endpoint, native_buffer, total_length,
-                             num_packets, isochronous_transfer_callback, (void *)&completed_flag, 0);
+                             num_packets, iso_transfer_cb, (void *)&completed, 1000);
 
     for (int i = 0; i < num_packets; i++) {
         transfer->iso_packet_desc[i].length = native_packet_lengths[i];
@@ -363,15 +381,20 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doIsochronousTransfer
     if (r < 0) {
         __android_log_print(ANDROID_LOG_ERROR, APPNAME, "Iso: libusb_submit_transfer failed: %s", libusb_error_name(r));
         result_status = libusb_to_errno(r);
-    } else {
-        while (completed_flag == 0) {
-            r = libusb_handle_events_completed(g_ctx, (int*)&completed_flag);
-            if (r < 0) {
-                if (r == LIBUSB_ERROR_INTERRUPTED) continue; // Loop again if interrupted
-                __android_log_print(ANDROID_LOG_ERROR, APPNAME, "Iso: libusb_handle_events failed: %s", libusb_error_name(r));
-                libusb_cancel_transfer(transfer); // Attempt to cancel before breaking
-                break;
+        goto cleanup_arrays;
+    }
+
+    while (!completed) {
+        struct timeval tv = {5, 0};
+        r = libusb_handle_events_timeout_completed(g_ctx, &tv, (int*)&completed);
+        if (r < 0) {
+            if (r == LIBUSB_ERROR_INTERRUPTED) {
+                continue;
             }
+            __android_log_print(ANDROID_LOG_ERROR, APPNAME, "Iso: libusb_handle_events failed with: %s", libusb_error_name(r));
+            // The transfer is now in an unknown state. Cancel it to be safe.
+            libusb_cancel_transfer(transfer);
+            break;
         }
     }
 
@@ -392,16 +415,15 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doIsochronousTransfer
         result_status = libusb_to_errno(transfer->status);
     }
 
-
     if ((endpoint & LIBUSB_ENDPOINT_IN) && result_status >= 0) {
         data_release_mode = 0; // Copy back buffer changes on success
         packet_release_mode = 0; // Copy back packet length changes on success
     }
-    (*env)->ReleaseIntArrayElements(env, iso_packet_lengths, native_packet_lengths, packet_release_mode);
-    native_packet_lengths = NULL;
 
 cleanup_arrays:
-    (*env)->ReleasePrimitiveArrayCritical(env, data, native_buffer, data_release_mode);
+    (*env)->ReleaseIntArrayElements(env, iso_packet_lengths, native_packet_lengths, packet_release_mode);
+    native_packet_lengths = NULL;
+    (*env)->ReleaseByteArrayElements(env, data, (jbyte*)native_buffer, data_release_mode);
     native_buffer = NULL;
 
 cleanup_transfer:

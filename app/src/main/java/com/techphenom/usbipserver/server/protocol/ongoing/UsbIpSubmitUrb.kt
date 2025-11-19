@@ -19,6 +19,7 @@ class UsbIpSubmitUrb(header: ByteArray) : UsbIpBasicPacket(header) {
     var outData: ByteArray = ByteArray(0)
 
     override fun toString(): String {
+        val isoPacketDescriptorsString =  isoPacketDescriptors.joinToString(separator = "\n", postfix = ",") { it.toString() }
         return """
             USBIP_CMD_SUBMIT
                 ${super.toString()},
@@ -27,7 +28,8 @@ class UsbIpSubmitUrb(header: ByteArray) : UsbIpBasicPacket(header) {
                 Start Frame: $startFrame,
                 Number of Packets: $numberOfPackets,
                 Interval: $interval,
-                Setup: $setup
+                Setup: ${if(setup.isEmpty()) "[]" else setup.toString()}
+                ISO Packet Descriptors: ${if(isoPacketDescriptors.isEmpty()) "[]" else isoPacketDescriptorsString}
             """
     }
 
@@ -101,6 +103,10 @@ class UsbIpSubmitUrb(header: ByteArray) : UsbIpBasicPacket(header) {
             _value = bb.getShort()
             _index = bb.getShort()
             _length = bb.getShort()
+        }
+
+        fun isEmpty(): Boolean {
+            return requestType == 0 && request == 0 && value == 0 && index == 0 && length == 0
         }
 
         override fun toString(): String {
