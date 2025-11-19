@@ -42,6 +42,7 @@ class UsbIpSubmitUrbReply(seqNum: Int, devId: Int, dir: Int, ep: Int) :
     }
 
     override fun toString(): String {
+        val isoPacketDescriptorsString = isoPacketDescriptors.joinToString(separator = "\n", postfix = ",") { it.toString() }
         return """
             USBIP_RET_SUBMIT
                 ${super.toString()},
@@ -50,6 +51,7 @@ class UsbIpSubmitUrbReply(seqNum: Int, devId: Int, dir: Int, ep: Int) :
                 Start Frame: $startFrame,
                 Number of Packets: $numberOfPackets,
                 Error Count: $errorCount
+                ISO Packet Descriptors: $isoPacketDescriptorsString
             """
     }
 }

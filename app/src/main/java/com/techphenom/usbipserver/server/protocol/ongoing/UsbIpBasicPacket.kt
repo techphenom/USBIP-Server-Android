@@ -87,11 +87,14 @@ abstract class UsbIpBasicPacket {
     }
 
     data class UsbIpIsoPacketDescriptor(
-        val offset: Int,
-        val length: Int,
-        val actualLength: Int,
-        val status: Int
+        var offset: Int,
+        var length: Int,
+        var actualLength: Int,
+        var status: Int
     ) {
+        override fun toString(): String {
+            return "[Offset: $offset, Len: $length, Actual Len: $actualLength, Status: $status]"
+        }
         companion object {
             const val WIRE_SIZE = 16
         }
