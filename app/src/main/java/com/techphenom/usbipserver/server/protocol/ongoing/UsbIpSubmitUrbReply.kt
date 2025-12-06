@@ -3,8 +3,8 @@ package com.techphenom.usbipserver.server.protocol.ongoing
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
-class UsbIpSubmitUrbReply(seqNum: Int, devId: Int, dir: Int, ep: Int) :
-    UsbIpBasicPacket(USBIP_RET_SUBMIT, seqNum, devId, dir, ep) {
+class UsbIpSubmitUrbReply(seqNum: Int) :
+    UsbIpBasicPacket(USBIP_RET_SUBMIT, seqNum, 0, 0, 0) {
 
     var status = -1
     var actualLength = 0
@@ -12,11 +12,11 @@ class UsbIpSubmitUrbReply(seqNum: Int, devId: Int, dir: Int, ep: Int) :
     var numberOfPackets = 0xffffffff.toInt()
     var errorCount = 0
 
-    var inData: ByteArray = ByteArray(0)
+    var inData: ByteBuffer = ByteBuffer.allocate(0)
     var isoPacketDescriptors: List<UsbIpIsoPacketDescriptor> = emptyList()
 
     override fun serializeInternal(): ByteArray {
-        val inDataLen = if (inData.isEmpty()) 0 else actualLength
+        val inDataLen = if (inData.capacity() == 0) 0 else actualLength
         val isoDescriptorSize = if (numberOfPackets <= 0) 0 else numberOfPackets * UsbIpIsoPacketDescriptor.WIRE_SIZE
         val totalSize = USBIP_HEADER_SIZE - 20 + inDataLen + isoDescriptorSize
 
@@ -29,7 +29,14 @@ class UsbIpSubmitUrbReply(seqNum: Int, devId: Int, dir: Int, ep: Int) :
         bb.position(USBIP_HEADER_SIZE - 20)
 
         if (inDataLen > 0) {
-            bb.put(inData, 0, inDataLen)
+            val originalLimit = inData.limit()
+
+            if (inData.remaining() > inDataLen) {
+                inData.limit(inData.position() + inDataLen)
+            }
+            bb.put(inData)
+
+            inData.limit(originalLimit)
         }
 
         for (descriptor in isoPacketDescriptors) {

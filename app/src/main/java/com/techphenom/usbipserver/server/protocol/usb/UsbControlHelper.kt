@@ -44,7 +44,7 @@ class UsbControlHelper {
                 null
             } else UsbDeviceDescriptor(descriptorBuffer)
         }
-        fun handleInternalControlTransfer(
+        fun doInternalControlTransfer(
             context: AttachedDeviceContext,
             requestType: Int,
             request: Int,
@@ -153,6 +153,11 @@ class UsbControlHelper {
                 }
             }
             return null
+        }
+
+        fun handleTransferInternally(requestType: Int, request: Int): Boolean {
+            return (requestType == SET_CONFIGURATION_REQUEST_TYPE && request == SET_CONFIGURATION_REQUEST) ||
+                    (requestType == SET_INTERFACE_REQUEST_TYPE && request == SET_INTERFACE_REQUEST)
         }
     }
 }

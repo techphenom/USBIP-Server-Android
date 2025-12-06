@@ -7,6 +7,19 @@ class UsbIpDeviceConstants {
         CONNECTABLE("Connectable"),
         NOT_CONNECTABLE("Not Connectable")
     }
+    enum class LibusbTransferType(val code: Int, val description: String) {
+        CONTROL(0, "CONTROL"),
+        ISOCHRONOUS(1, "ISO"),
+        BULK(2, "BULK"),
+        INTERRUPT(3, "INTERRUPT"),
+        BULK_STREAM(4, "Bulk stream transfer");
+
+        companion object {
+            fun fromCode(code: Int): LibusbTransferType? =
+                entries.find { it.code == code }
+        }
+    }
+
     companion object {
         const val USB_SPEED_UNKNOWN = 0
         const val USB_SPEED_LOW = 1 // Low Speed (1.5Mbps)
