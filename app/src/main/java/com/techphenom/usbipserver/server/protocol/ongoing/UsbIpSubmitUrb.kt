@@ -87,15 +87,19 @@ class UsbIpSubmitUrb(header: ByteArray) : UsbIpBasicPacket(header) {
         private val _value: Short
         private val _index: Short
         private val _length: Short
+        private val _bytes: ByteArray
+
 
         val requestType: Int get() = _requestType.toInt() and 0xFF
         val request: Int get() = _request.toInt() and 0xFF
         val value: Int get() = _value.toInt() and 0xFFFF
         val index: Int get() = _index.toInt() and 0xFFFF
         val length: Int get() = _length.toInt() and 0xFFFF
+        val bytes: ByteArray get() = _bytes
+
 
         init {
-            require(bytes.size == 8) { "Setup packet must be 8 bytes long" }
+            require(bytes.size == CONTROL_SETUP_WIRE_SIZE) { "Setup packet must be 8 bytes long" }
 
             val bb = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
             _requestType = bb.get()
@@ -103,6 +107,8 @@ class UsbIpSubmitUrb(header: ByteArray) : UsbIpBasicPacket(header) {
             _value = bb.getShort()
             _index = bb.getShort()
             _length = bb.getShort()
+
+            _bytes = bytes
         }
 
         fun isEmpty(): Boolean {
@@ -117,6 +123,10 @@ class UsbIpSubmitUrb(header: ByteArray) : UsbIpBasicPacket(header) {
                 index=${intToHex(index)},
                 length=$length
                 ]"""
+        }
+
+        companion object {
+            const val CONTROL_SETUP_WIRE_SIZE = 8
         }
     }
 }
