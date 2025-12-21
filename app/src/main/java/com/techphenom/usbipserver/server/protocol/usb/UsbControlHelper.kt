@@ -5,6 +5,7 @@ import android.hardware.usb.UsbInterface
 import android.util.SparseArray
 import com.techphenom.usbipserver.server.AttachedDeviceContext
 import com.techphenom.usbipserver.server.protocol.utils.Logger
+import java.nio.ByteBuffer
 
 class UsbControlHelper {
     companion object {
@@ -32,13 +33,13 @@ class UsbControlHelper {
         private const val DEVICE_DESCRIPTOR_TYPE = 1
 
         fun readDeviceDescriptor(usbLib: UsbLib, context: AttachedDeviceContext): UsbDeviceDescriptor? {
-            val descriptorBuffer = ByteArray(UsbDeviceDescriptor.DESCRIPTOR_SIZE)
+            val descriptorBuffer = ByteBuffer.allocateDirect(UsbDeviceDescriptor.DESCRIPTOR_SIZE)
             val res: Int = usbLib.doControlTransfer(
                 context.devConn.fileDescriptor,
                 GET_DESCRIPTOR_REQUEST_TYPE.toByte(),
                 GET_DESCRIPTOR_REQUEST.toByte(),
                 (DEVICE_DESCRIPTOR_TYPE shl 8 or 0x00).toShort(),  // Devices only have 1 descriptor
-                0, descriptorBuffer, descriptorBuffer.size, 0
+                0, descriptorBuffer, descriptorBuffer.capacity(), 0
             )
             return if (res != UsbDeviceDescriptor.DESCRIPTOR_SIZE) {
                 null

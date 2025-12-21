@@ -12,11 +12,11 @@ class UsbIpSubmitUrbReply(seqNum: Int) :
     var numberOfPackets = 0xffffffff.toInt()
     var errorCount = 0
 
-    var inData: ByteBuffer = ByteBuffer.allocate(0)
+    var inData: ByteBuffer? = null
     var isoPacketDescriptors: List<UsbIpIsoPacketDescriptor> = emptyList()
 
     override fun serializeInternal(): ByteArray {
-        val inDataLen = if (inData.capacity() == 0) 0 else actualLength
+        val inDataLen = if (inData == null || inData!!.capacity() == 0) 0 else actualLength
         val isoDescriptorSize = if (numberOfPackets <= 0) 0 else numberOfPackets * UsbIpIsoPacketDescriptor.WIRE_SIZE
         val totalSize = USBIP_HEADER_SIZE - 20 + inDataLen + isoDescriptorSize
 
@@ -28,15 +28,16 @@ class UsbIpSubmitUrbReply(seqNum: Int) :
         bb.putInt(errorCount)
         bb.position(USBIP_HEADER_SIZE - 20)
 
-        if (inDataLen > 0) {
-            val originalLimit = inData.limit()
+        if (inDataLen > 0 && inData != null) {
+            val buf = inData!!
+            val originalLimit = buf.limit()
 
-            if (inData.remaining() > inDataLen) {
-                inData.limit(inData.position() + inDataLen)
+            if (buf.remaining() > inDataLen) {
+                buf.limit(buf.position() + inDataLen)
             }
-            bb.put(inData)
+            bb.put(buf)
 
-            inData.limit(originalLimit)
+            buf.limit(originalLimit)
         }
 
         for (descriptor in isoPacketDescriptors) {

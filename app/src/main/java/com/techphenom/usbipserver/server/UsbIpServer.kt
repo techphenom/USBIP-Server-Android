@@ -39,11 +39,8 @@ import java.util.concurrent.ConcurrentHashMap
 import com.techphenom.usbipserver.server.UsbIpDeviceConstants.UsbIpDeviceState.*
 import com.techphenom.usbipserver.server.UsbIpDeviceConstants.LibusbTransferType
 import com.techphenom.usbipserver.server.protocol.usb.UsbLib
-import kotlinx.coroutines.ExecutorCoroutineDispatcher
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.asCoroutineDispatcher
 import java.nio.ByteBuffer
-import java.util.concurrent.Executors
 
 class UsbIpServer(
     private val repository: UsbIpRepository,
@@ -131,6 +128,9 @@ class UsbIpServer(
                             val output = socket.getOutputStream()
                             for (reply in context.replyChannel) {
                                 output.write(reply.serialize())
+                                if (reply is UsbIpSubmitUrbReply) {
+                                    context.releaseBuffer(reply.inData)
+                                }
                             }
                         } catch (e: IOException) {
                             Logger.e("WriterLoop", "Error writing to socket: ${e.message}")
@@ -424,7 +424,9 @@ class UsbIpServer(
             }
         } else context.transferSemaphore.acquire()
 
-        val transferBuffer = ByteBuffer.allocateDirect(inMsg.transferBufferLength)
+        val transferBuffer = context.acquireBuffer(inMsg.transferBufferLength)
+        transferBuffer.limit(inMsg.transferBufferLength)
+
         if (inMsg.direction == UsbIpBasicPacket.USBIP_DIR_OUT) {
             transferBuffer.put(inMsg.outData)
             transferBuffer.position(0)
@@ -439,22 +441,35 @@ class UsbIpServer(
                 with(inMsg.setup) {
                     if(UsbControlHelper.handleTransferInternally(requestType, request)) {
                         UsbControlHelper.doInternalControlTransfer(context, requestType, request, value,index)
-                        onTransferCompleted(inMsg.seqNum, 0, 0, LibusbTransferType.CONTROL.code, isoPacketLengths, null)
+                        onTransferCompleted(inMsg.seqNum, ProtocolCodes.STATUS_OK, 0, LibusbTransferType.CONTROL.code, isoPacketLengths, null)
                         return
                     } else {
-                        val controlBuffer = ByteBuffer.allocateDirect(CONTROL_SETUP_WIRE_SIZE + length)
-                        controlBuffer.put(bytes)
-                        if (inMsg.direction == UsbIpBasicPacket.USBIP_DIR_OUT && length > 0) {
-                            controlBuffer.put(inMsg.outData)
-                        }
-                        controlBuffer.position(0)
-                        context.pendingTransfers[inMsg.seqNum]!!.updateBuffer(controlBuffer)
-                        submitRes = usbLib.doControlTransferAsync(
+//                        val controlBuffer = ByteBuffer.allocateDirect(CONTROL_SETUP_WIRE_SIZE + length)
+//                        controlBuffer.put(bytes)
+//                        if (inMsg.direction == UsbIpBasicPacket.USBIP_DIR_OUT && length > 0) {
+//                            controlBuffer.put(inMsg.outData)
+//                        }
+//                        controlBuffer.position(0)
+//                        context.pendingTransfers[inMsg.seqNum]!!.updateBuffer(controlBuffer)
+//                        submitRes = usbLib.doControlTransferAsync(
+//                            context.devConn.fileDescriptor,
+//                            controlBuffer,
+//                            300,
+//                            inMsg.seqNum
+//                        )
+                        submitRes = usbLib.doControlTransfer(
                             context.devConn.fileDescriptor,
-                            controlBuffer,
-                            300,
-                            inMsg.seqNum
+                            requestType.toByte(),
+                            request.toByte(),
+                            value.toShort(),
+                            index.toShort(),
+                            transferBuffer.slice(),
+                            length,
+                            300
                         )
+                        if(submitRes >= 0){
+                            onTransferCompleted(inMsg.seqNum, ProtocolCodes.STATUS_OK, submitRes, LibusbTransferType.CONTROL.code, isoPacketLengths, null)
+                        }
                     }
                 }
             }
@@ -463,7 +478,7 @@ class UsbIpServer(
                 submitRes = usbLib.doBulkTransferAsync(
                     context.devConn.fileDescriptor,
                     epAddress,
-                    transferBuffer,
+                    transferBuffer.slice(),
                     300,
                     inMsg.seqNum
                 )
@@ -473,7 +488,7 @@ class UsbIpServer(
                 submitRes = usbLib.doInterruptTransferAsync(
                     context.devConn.fileDescriptor,
                     epAddress,
-                    transferBuffer,
+                    transferBuffer.slice(),
                     100,
                     inMsg.seqNum
                 )
@@ -483,7 +498,7 @@ class UsbIpServer(
                 submitRes = usbLib.doIsochronousTransferAsync(
                     context.devConn.fileDescriptor,
                     epAddress,
-                    transferBuffer,
+                    transferBuffer.slice(),
                     isoPacketLengths,
                     inMsg.seqNum
                 )
@@ -517,6 +532,7 @@ class UsbIpServer(
 
         val reply = UsbIpUnlinkUrbReply(msg.seqNum)
         reply.status = if (wasCancelled) UsbIpBasicPacket.USBIP_ECONNRESET else 0
+        Logger.i("abortUrbRequest", "$reply")
         context.replyChannel.trySend(reply)
     }
 
@@ -527,11 +543,11 @@ class UsbIpServer(
         for (context in attachedDevices.values) {
             val pending = context.pendingTransfers.remove(seqNum)
             if (pending != null) {
-                if (transferType == LibusbTransferType.CONTROL && actualLength > 0) {
-                    pending.transferBuffer.position(8) // Skip CONTROL Transfer 8-byte header
-                } else {
-                    pending.transferBuffer.position(0) // Ensure buffer at starting position
-                }
+//                if (transferType == LibusbTransferType.CONTROL && actualLength > 0) {
+//                    pending.transferBuffer.position(8) // Skip CONTROL Transfer 8-byte header
+//                } else {
+//                    pending.transferBuffer.position(0) // Ensure buffer at starting position
+//                }
                 if(transferType == LibusbTransferType.CONTROL){
                     repeat(AttachedDeviceContext.MAX_CONCURRENT_TRANSFERS) {
                         context.transferSemaphore.release()
@@ -563,7 +579,10 @@ class UsbIpServer(
         reply.status = status
         reply.actualLength = actualLength
         reply.inData = if(request.direction == UsbIpBasicPacket.USBIP_DIR_IN) transferBuffer
-            else ByteBuffer.allocate(0)
+        else {
+            context.releaseBuffer(transferBuffer)
+            null
+        }
 
         reply.isoPacketDescriptors = request.isoPacketDescriptors.toList()
         reply.numberOfPackets = request.numberOfPackets
@@ -576,6 +595,5 @@ class UsbIpServer(
 
         Logger.i("submitUrbRequest", "$reply")
         context.replyChannel.trySend(reply)
-
     }
 }

@@ -31,7 +31,7 @@ class UsbLib {
         request: Byte,
         value: Short,
         index: Short,
-        data: ByteArray,
+        data: ByteBuffer,
         length: Int,
         timeout: Int
     ): Int

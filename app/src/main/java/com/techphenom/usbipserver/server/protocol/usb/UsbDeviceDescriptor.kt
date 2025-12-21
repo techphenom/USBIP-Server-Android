@@ -4,7 +4,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 
-class UsbDeviceDescriptor(data: ByteArray) {
+class UsbDeviceDescriptor(data: ByteBuffer) {
     var bLength: Byte
     var bDescriptorType: Byte
     var bcdUSB: Short
@@ -21,21 +21,23 @@ class UsbDeviceDescriptor(data: ByteArray) {
     var bNumConfigurations: Byte
 
     init {
-        val bb = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
-        bLength = bb.get()
-        bDescriptorType = bb.get()
-        bcdUSB = bb.getShort()
-        bDeviceClass = bb.get()
-        bDeviceSubClass = bb.get()
-        bDeviceProtocol = bb.get()
-        bMaxPacketSize = bb.get()
-        idVendor = bb.getShort()
-        idProduct = bb.getShort()
-        bcdDevice = bb.getShort()
-        iManufacturer = bb.get()
-        iProduct = bb.get()
-        iSerialNumber = bb.get()
-        bNumConfigurations = bb.get()
+        data.order(ByteOrder.LITTLE_ENDIAN)
+        data.position(0)
+
+        bLength = data.get()
+        bDescriptorType = data.get()
+        bcdUSB = data.getShort()
+        bDeviceClass = data.get()
+        bDeviceSubClass = data.get()
+        bDeviceProtocol = data.get()
+        bMaxPacketSize = data.get()
+        idVendor = data.getShort()
+        idProduct = data.getShort()
+        bcdDevice = data.getShort()
+        iManufacturer = data.get()
+        iProduct = data.get()
+        iSerialNumber = data.get()
+        bNumConfigurations = data.get()
     }
 
     companion object {

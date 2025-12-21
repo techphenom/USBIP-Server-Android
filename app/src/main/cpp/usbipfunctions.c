@@ -381,31 +381,42 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doControlTransfer(JNI
                                                                            jbyte request,
                                                                            jshort value,
                                                                            jshort index,
-                                                                           jbyteArray data,
+                                                                           jobject buffer,
                                                                            jint length,
                                                                            jint timeout) {
     libusb_device_handle *dev_handle = NULL;
     int r;
     jint result_status = -EIO;
     unsigned char *native_buffer = NULL;
+    int needs_cleanup = 0;
 
     if (g_ctx == NULL) {
         __android_log_print(ANDROID_LOG_ERROR, APPNAME, "Ctrl: Libusb context not initialized! Call init() first.");
         return -EFAULT;
     }
 
-    r = libusb_wrap_sys_device(g_ctx, (intptr_t)fd, &dev_handle);
-    if (r < 0 || dev_handle == NULL) {
-        __android_log_print(ANDROID_LOG_ERROR, APPNAME, "Ctrl: libusb_wrap_sys_device for fd %d failed: %s", fd, libusb_error_name(r));
-        return libusb_to_errno(r);
+    pthread_mutex_lock(&g_attachedDevicesMutex);
+    for (int i = 0; i < MAX_ATTACHED_DEVICES; i++) {
+        if (g_attachedDevices[i].fd == fd) {
+            dev_handle = g_attachedDevices[i].handle;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_attachedDevicesMutex);
+    if (dev_handle == NULL) { // If running before device attached
+        r = libusb_wrap_sys_device(g_ctx, (intptr_t)fd, &dev_handle);
+        needs_cleanup = 1;
+        if (r < 0 || dev_handle == NULL) {
+            __android_log_print(ANDROID_LOG_ERROR, APPNAME, "Ctrl: libusb_wrap_sys_device for fd %d failed: %s", fd, libusb_error_name(r));
+            return libusb_to_errno(r);
+        }
     }
 
-    if (length > 0 && data != NULL) {
-        native_buffer = (unsigned char *) (*env)->GetByteArrayElements(env, data, NULL);
+    if (length > 0 && buffer != NULL) {
+        native_buffer = (unsigned char *) (*env)->GetDirectBufferAddress(env, buffer);
         if (native_buffer == NULL) {
-            __android_log_print(ANDROID_LOG_ERROR, APPNAME, "Ctrl: GetByteArrayElements failed for control transfer");
-            result_status = -ENOMEM;
-            goto cleanup;
+            __android_log_print(ANDROID_LOG_ERROR, APPNAME, "SyncCtrl: Buffer is not a Direct ByteBuffer!");
+            return -EFAULT;
         }
     }
 
@@ -433,17 +444,7 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doControlTransfer(JNI
         result_status = r;
     }
 
-    if (native_buffer != NULL) {
-        int release_mode = JNI_ABORT;
-        if ((request_type & LIBUSB_ENDPOINT_IN) && r >= 0) {
-            release_mode = 0;
-        }
-        (*env)->ReleaseByteArrayElements(env, data, (jbyte*)native_buffer, release_mode);
-        native_buffer = NULL;
-    }
-
-    cleanup:
-    if (dev_handle != NULL) {
+    if (needs_cleanup) {
         libusb_close(dev_handle);
     }
 
