@@ -592,6 +592,7 @@ class UsbIpServer(
             reply.isoPacketDescriptors[i].status = validIsoStatuses[i]
             if(validIsoStatuses[i] < 0) reply.errorCount++
         }
+        reply.errorCount = if(status < 0 && request.numberOfPackets == 0) 1 else 0
 
         Logger.i("submitUrbRequest", "$reply")
         context.replyChannel.trySend(reply)

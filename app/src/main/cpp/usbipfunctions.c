@@ -54,6 +54,19 @@ static int libusb_to_errno(int libusb_err) {
     }
 }
 
+static int libusb_status_to_errno(int libusb_status) {
+    switch (libusb_status) {
+        case LIBUSB_TRANSFER_COMPLETED: return 0;
+        case LIBUSB_TRANSFER_TIMED_OUT: return -ETIMEDOUT;
+        case LIBUSB_TRANSFER_CANCELLED: return -ENOENT;
+        case LIBUSB_TRANSFER_STALL: return -EPIPE;
+        case LIBUSB_TRANSFER_NO_DEVICE: return -ENODEV;
+        case LIBUSB_TRANSFER_OVERFLOW: return -EOVERFLOW;
+        case LIBUSB_TRANSFER_ERROR: return -EPROTO;
+        default: return -EIO;
+    }
+}
+
 JNIEXPORT jint JNICALL
 Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_init(JNIEnv *env, jobject thiz) {
     if (g_ctx != NULL) {
@@ -342,7 +355,7 @@ void LIBUSB_CALL generic_transfer_cb(struct libusb_transfer *transfer) {
                     totalActualLength += temp_lengths[i];
 
                     int packet_status = transfer->iso_packet_desc[i].status;
-                    temp_statuses[i] = (jint) libusb_to_errno(packet_status);
+                    temp_statuses[i] = (jint) libusb_status_to_errno(packet_status);
                 }
 
                 (*env)->SetIntArrayRegion(env, iso_actual_lengths, 0, num_packets, temp_lengths);
@@ -355,7 +368,7 @@ void LIBUSB_CALL generic_transfer_cb(struct libusb_transfer *transfer) {
 
     (*env)->CallVoidMethod(env, g_usbLibInstance, g_onTransferCompletedMethodID,
                            seqNum,
-                           libusb_to_errno(transfer->status),
+                           libusb_status_to_errno(transfer->status),
                            (jint)totalActualLength,
                            (jint)transfer->type,
                            iso_actual_lengths,
