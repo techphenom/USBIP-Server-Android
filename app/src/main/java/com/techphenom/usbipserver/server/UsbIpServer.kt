@@ -67,6 +67,7 @@ class UsbIpServer(
         val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
             Logger.e("start()" , "$throwable")
         }
+        serverShutdown = false
         if(usbLib.init() < 0) throw IOException("Unable to initialize libusb")
         usbLib.setListener(this)
 
@@ -78,7 +79,6 @@ class UsbIpServer(
                 handleClientConnection(serverSocket.accept(), this)
             }
         }
-        serverShutdown = false
     }
 
     fun stop() {
@@ -429,8 +429,10 @@ class UsbIpServer(
             }
         } else context.transferSemaphore.acquire()
 
-        val transferBuffer = context.acquireBuffer(inMsg.transferBufferLength)
-        transferBuffer.limit(inMsg.transferBufferLength)
+        var totalBufferLength = inMsg.transferBufferLength
+        if(epType == USB_ENDPOINT_XFER_CONTROL) totalBufferLength += CONTROL_SETUP_WIRE_SIZE
+        val transferBuffer = context.acquireBuffer(totalBufferLength)
+        transferBuffer.limit(totalBufferLength)
 
         if (inMsg.direction == UsbIpBasicPacket.USBIP_DIR_OUT) {
             transferBuffer.put(inMsg.outData)
@@ -449,32 +451,19 @@ class UsbIpServer(
                         onTransferCompleted(inMsg.seqNum, ProtocolCodes.STATUS_OK, 0, LibusbTransferType.CONTROL.code, isoPacketLengths, null)
                         return
                     } else {
-//                        val controlBuffer = ByteBuffer.allocateDirect(CONTROL_SETUP_WIRE_SIZE + length)
-//                        controlBuffer.put(bytes)
-//                        if (inMsg.direction == UsbIpBasicPacket.USBIP_DIR_OUT && length > 0) {
-//                            controlBuffer.put(inMsg.outData)
-//                        }
-//                        controlBuffer.position(0)
-//                        context.pendingTransfers[inMsg.seqNum]!!.updateBuffer(controlBuffer)
-//                        submitRes = usbLib.doControlTransferAsync(
-//                            context.devConn.fileDescriptor,
-//                            controlBuffer,
-//                            300,
-//                            inMsg.seqNum
-//                        )
-                        submitRes = usbLib.doControlTransfer(
-                            context.devConn.fileDescriptor,
-                            requestType.toByte(),
-                            request.toByte(),
-                            value.toShort(),
-                            index.toShort(),
-                            transferBuffer.slice(),
-                            length,
-                            300
-                        )
-                        if(submitRes >= 0){
-                            onTransferCompleted(inMsg.seqNum, ProtocolCodes.STATUS_OK, submitRes, LibusbTransferType.CONTROL.code, isoPacketLengths, null)
+                        transferBuffer.clear()
+                        transferBuffer.limit(totalBufferLength)
+                        transferBuffer.put(bytes)
+                        if (inMsg.direction == UsbIpBasicPacket.USBIP_DIR_OUT && length > 0) {
+                            transferBuffer.put(inMsg.outData)
                         }
+                        transferBuffer.position(0)
+                        submitRes = usbLib.doControlTransferAsync(
+                            context.devConn.fileDescriptor,
+                            transferBuffer.slice(),
+                            300,
+                            inMsg.seqNum
+                        )
                     }
                 }
             }
@@ -542,17 +531,17 @@ class UsbIpServer(
     }
 
     override fun onTransferCompleted(seqNum: Int, status: Int, actualLength: Int, type: Int, isoPacketActualLengths: IntArray?, isoPacketStatuses: IntArray?) {
-        val transferType = LibusbTransferType.fromCode(type);
+        val transferType = LibusbTransferType.fromCode(type)
         Logger.i("onTransferCompleted", "${transferType?.description}: $seqNum - Complete with $actualLength bytes (status: $status)")
 
         for (context in attachedDevices.values) {
             val pending = context.pendingTransfers.remove(seqNum)
             if (pending != null) {
-//                if (transferType == LibusbTransferType.CONTROL && actualLength > 0) {
-//                    pending.transferBuffer.position(8) // Skip CONTROL Transfer 8-byte header
-//                } else {
-//                    pending.transferBuffer.position(0) // Ensure buffer at starting position
-//                }
+                if (transferType == LibusbTransferType.CONTROL && actualLength > 0) {
+                    pending.transferBuffer.position(8) // Skip CONTROL Transfer 8-byte header
+                } else {
+                    pending.transferBuffer.position(0) // Ensure buffer at starting position
+                }
                 if(transferType == LibusbTransferType.CONTROL){
                     repeat(AttachedDeviceContext.MAX_CONCURRENT_TRANSFERS) {
                         context.transferSemaphore.release()
