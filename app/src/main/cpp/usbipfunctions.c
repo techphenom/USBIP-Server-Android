@@ -7,7 +7,7 @@
 #include "libusb_src/libusb/libusb.h"
 
 #define APPNAME "UsbIpServerNativeLibusb"
-#define MAX_ASYNC_TRANSFERS 256
+#define MAX_ASYNC_TRANSFERS_PER_DEVICE 32
 #define MAX_ATTACHED_DEVICES 16
 
 struct ActiveTransfer {
@@ -17,10 +17,11 @@ struct ActiveTransfer {
 struct AttachedDeviceHandle {
     int fd;
     libusb_device_handle* handle;
+    pthread_mutex_t transferMutex;
+    struct ActiveTransfer activeTransfers[MAX_ASYNC_TRANSFERS_PER_DEVICE];
 };
 
 static libusb_context *g_ctx = NULL;
-static pthread_mutex_t g_transferMapMutex;
 static pthread_mutex_t g_attachedDevicesMutex;
 static pthread_t g_eventThread;
 static jobject g_usbLibInstance = NULL;
@@ -29,7 +30,6 @@ JavaVM* g_jvm = NULL;
 
 static volatile int g_keepEventThreadRunning = 0;
 static int open_devs = 0;
-static struct ActiveTransfer g_activeTransfers[MAX_ASYNC_TRANSFERS];
 static struct AttachedDeviceHandle g_attachedDevices[MAX_ATTACHED_DEVICES];
 
 static int libusb_to_errno(int libusb_err) {
@@ -93,14 +93,16 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_init(JNIEnv *env, job
         return libusb_to_errno(r);
     }
 
-    pthread_mutex_init(&g_transferMapMutex, NULL);
     pthread_mutex_init(&g_attachedDevicesMutex, NULL);
-    for (int i = 0; i < MAX_ASYNC_TRANSFERS; i++) {
-        g_activeTransfers[i].seqNum = -1; // -1 flag for empty slot
-        g_activeTransfers[i].transfer = NULL;
-    }
     for (int i = 0; i < MAX_ATTACHED_DEVICES; i++) {
-        g_attachedDevices[i].fd = -1; // -1 flag for empty slot
+        g_attachedDevices[i].fd = -1;
+        g_attachedDevices[i].handle = NULL;
+        pthread_mutex_init(&g_attachedDevices[i].transferMutex, NULL);
+
+        for(int j=0; j<MAX_ASYNC_TRANSFERS_PER_DEVICE; j++){
+            g_attachedDevices[i].activeTransfers[j].seqNum = -1;
+            g_attachedDevices[i].activeTransfers[j].transfer = NULL;
+        }
     }
 
     if (g_usbLibInstance == NULL) {
@@ -113,7 +115,50 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_init(JNIEnv *env, job
 
 JNIEXPORT void JNICALL
 Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_exit(JNIEnv *env, jobject thiz) {
-    __android_log_print(ANDROID_LOG_INFO, APPNAME, "Exit requested. Cleaning up...");
+    __android_log_print(ANDROID_LOG_INFO, APPNAME, "Exit requested. Cancelling all active transfers...");
+
+    pthread_mutex_lock(&g_attachedDevicesMutex);
+    for(int i=0; i<MAX_ATTACHED_DEVICES; i++) {
+        if (g_attachedDevices[i].fd != -1) {
+            pthread_mutex_lock(&g_attachedDevices[i].transferMutex);
+            for(int j=0; j<MAX_ASYNC_TRANSFERS_PER_DEVICE; j++) {
+                if (g_attachedDevices[i].activeTransfers[j].transfer != NULL) {
+                    libusb_cancel_transfer(g_attachedDevices[i].activeTransfers[j].transfer);
+                }
+            }
+            pthread_mutex_unlock(&g_attachedDevices[i].transferMutex);
+        }
+    }
+    pthread_mutex_unlock(&g_attachedDevicesMutex);
+
+    int timeout_ms = 5000;
+    while (timeout_ms > 0) {
+        int active_count = 0;
+
+        pthread_mutex_lock(&g_attachedDevicesMutex);
+        for(int i=0; i<MAX_ATTACHED_DEVICES; i++) {
+            if (g_attachedDevices[i].fd != -1) {
+                pthread_mutex_lock(&g_attachedDevices[i].transferMutex);
+                for(int j=0; j<MAX_ASYNC_TRANSFERS_PER_DEVICE; j++) {
+                    if (g_attachedDevices[i].activeTransfers[j].transfer != NULL) active_count++;
+                }
+                pthread_mutex_unlock(&g_attachedDevices[i].transferMutex);
+            }
+        }
+        pthread_mutex_unlock(&g_attachedDevicesMutex);
+
+        if (active_count == 0) {
+            __android_log_print(ANDROID_LOG_INFO, APPNAME, "All active transfers reaped.");
+            break;
+        }
+
+        struct timeval tv = {0, 10000}; // Wait for up to 10ms for an event.
+        libusb_handle_events_timeout(g_ctx, &tv);
+        timeout_ms -= 10;
+    }
+    if (timeout_ms <= 0) {
+        __android_log_print(ANDROID_LOG_WARN, APPNAME, "Exit timeout! Some transfers may not have been reaped.");
+    }
 
     if (g_keepEventThreadRunning) {
         __android_log_print(ANDROID_LOG_INFO, APPNAME, "Stopping background event thread...");
@@ -127,53 +172,15 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_exit(JNIEnv *env, job
         __android_log_print(ANDROID_LOG_INFO, APPNAME, "Background event thread stopped.");
     }
 
-    pthread_mutex_lock(&g_transferMapMutex);
-    int active_count = 0;
-    for (int i = 0; i < MAX_ASYNC_TRANSFERS; i++) {
-        if (g_activeTransfers[i].transfer != NULL) {
-            libusb_cancel_transfer(g_activeTransfers[i].transfer);
-            active_count++;
-        }
-    }
-    pthread_mutex_unlock(&g_transferMapMutex);
-
-    if (active_count > 0) {
-        __android_log_print(ANDROID_LOG_INFO, APPNAME, "Cancelled %d active transfers.", active_count);
-    }
-
-    int timeout_ms = 500; // 500ms
-    while (timeout_ms > 0) {
-        pthread_mutex_lock(&g_transferMapMutex);
-        int remaining_transfers = 0;
-        for (int i = 0; i < MAX_ASYNC_TRANSFERS; i++) {
-            if (g_activeTransfers[i].transfer != NULL) {
-                remaining_transfers++;
-            }
-        }
-        pthread_mutex_unlock(&g_transferMapMutex);
-
-        if (remaining_transfers == 0) {
-            __android_log_print(ANDROID_LOG_INFO, APPNAME, "All active transfers have been reaped.");
-            break;
-        }
-
-        struct timeval tv = {0, 10000}; // Wait for up to 10ms for an event.
-        libusb_handle_events_timeout(g_ctx, &tv);
-        timeout_ms -= 10;
-    }
-
-    if (timeout_ms <= 0) {
-        __android_log_print(ANDROID_LOG_WARN, APPNAME, "Exit timeout! Some transfers may not have been reaped.");
-    }
-
     pthread_mutex_lock(&g_attachedDevicesMutex);
     for (int i = 0; i < MAX_ATTACHED_DEVICES; i++) {
         if (g_attachedDevices[i].handle != NULL) {
             __android_log_print(ANDROID_LOG_WARN, APPNAME, "Force closing orphan device handle for fd %d", g_attachedDevices[i].fd);
             libusb_close(g_attachedDevices[i].handle);
             g_attachedDevices[i].handle = NULL;
-            g_attachedDevices[i].fd = -1;
         }
+        g_attachedDevices[i].fd = -1;
+        pthread_mutex_destroy(&g_attachedDevices[i].transferMutex);
     }
     open_devs = 0;
     pthread_mutex_unlock(&g_attachedDevicesMutex);
@@ -188,7 +195,7 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_exit(JNIEnv *env, job
         g_ctx = NULL;
         __android_log_print(ANDROID_LOG_INFO, APPNAME, "Libusb context de-initialized.");
     }
-    pthread_mutex_destroy(&g_transferMapMutex);
+
     pthread_mutex_destroy(&g_attachedDevicesMutex);
 }
 
@@ -268,37 +275,74 @@ JNIEXPORT jint JNICALL
 Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_closeDeviceHandle(JNIEnv *env,
                                                                              jobject thiz,
                                                                              jint fd) {
-    libusb_device_handle *handle_to_close = NULL;
+    struct AttachedDeviceHandle* targetDev = NULL;
     int stop_thread = 0;
+
+    if (g_ctx == NULL) {
+        __android_log_print(ANDROID_LOG_WARN, APPNAME, "Ignored closeDeviceHandle for fd %d: Libusb context already destroyed", fd);
+        return 0;
+    }
 
     pthread_mutex_lock(&g_attachedDevicesMutex);
     for (int i = 0; i < MAX_ATTACHED_DEVICES; i++) {
         if (g_attachedDevices[i].fd == fd) {
-            handle_to_close = g_attachedDevices[i].handle;
-            g_attachedDevices[i].fd = -1;
-            g_attachedDevices[i].handle = NULL;
+            targetDev = &g_attachedDevices[i];
             break;
-        }
-    }
-
-    if (handle_to_close != NULL) {
-        open_devs--;
-        if (open_devs == 0) {
-            stop_thread = 1;
-            g_keepEventThreadRunning = 0;
         }
     }
     pthread_mutex_unlock(&g_attachedDevicesMutex);
 
-    if (handle_to_close) {
-        libusb_close(handle_to_close);
+    if (targetDev == NULL) return 0; // Already closed
+
+    pthread_mutex_lock(&targetDev->transferMutex);
+    int active_count = 0;
+    for (int i = 0; i < MAX_ASYNC_TRANSFERS_PER_DEVICE; i++) {
+        if (targetDev->activeTransfers[i].transfer != NULL) {
+            libusb_cancel_transfer(targetDev->activeTransfers[i].transfer);
+            active_count++;
+        }
+    }
+    pthread_mutex_unlock(&targetDev->transferMutex);
+
+    if (active_count > 0) {
+        int retries = 50; // 500ms
+        while (retries > 0) {
+            int remaining = 0;
+            pthread_mutex_lock(&targetDev->transferMutex);
+            for (int i = 0; i < MAX_ASYNC_TRANSFERS_PER_DEVICE; i++) {
+                if (targetDev->activeTransfers[i].transfer != NULL) remaining++;
+            }
+            pthread_mutex_unlock(&targetDev->transferMutex);
+
+            if (remaining == 0) break;
+
+            struct timeval tv = {0, 10000};
+            libusb_handle_events_timeout(g_ctx, &tv);
+            retries--;
+        }
+    }
+
+    pthread_mutex_lock(&g_attachedDevicesMutex);
+    libusb_device_handle* handle = targetDev->handle;
+
+    targetDev->fd = -1;
+    targetDev->handle = NULL;
+
+    if (handle) {
+        libusb_close(handle);
         __android_log_print(ANDROID_LOG_INFO, APPNAME, "Closed handle for fd %d", fd);
     }
 
+    open_devs--;
+    if (open_devs == 0) {
+        stop_thread = 1;
+        g_keepEventThreadRunning = 0;
+    }
+
+    pthread_mutex_unlock(&g_attachedDevicesMutex);
+
     if (stop_thread) {
-        if (g_ctx != NULL) {
-            libusb_interrupt_event_handler(g_ctx);
-        }
+        if (g_ctx != NULL) libusb_interrupt_event_handler(g_ctx);
         pthread_join(g_eventThread, NULL);
     }
 
@@ -308,16 +352,25 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_closeDeviceHandle(JNI
 void LIBUSB_CALL generic_transfer_cb(struct libusb_transfer *transfer) {
     int seqNum = (int)(intptr_t)transfer->user_data;
     int totalActualLength = transfer->actual_length;
+    libusb_device_handle *handle = transfer->dev_handle;
 
-    pthread_mutex_lock(&g_transferMapMutex);
-    for (int i = 0; i < MAX_ASYNC_TRANSFERS; i++) {
-        if (g_activeTransfers[i].seqNum == seqNum) {
-            g_activeTransfers[i].seqNum = -1;
-            g_activeTransfers[i].transfer = NULL;
+    pthread_mutex_lock(&g_attachedDevicesMutex);
+    for (int i = 0; i < MAX_ATTACHED_DEVICES; i++) {
+        if (g_attachedDevices[i].handle == handle) {
+
+            pthread_mutex_lock(&g_attachedDevices[i].transferMutex);
+            for (int j = 0; j < MAX_ASYNC_TRANSFERS_PER_DEVICE; j++) {
+                if (g_attachedDevices[i].activeTransfers[j].seqNum == seqNum) {
+                    g_attachedDevices[i].activeTransfers[j].seqNum = -1;
+                    g_attachedDevices[i].activeTransfers[j].transfer = NULL;
+                    break;
+                }
+            }
+            pthread_mutex_unlock(&g_attachedDevices[i].transferMutex);
             break;
         }
     }
-    pthread_mutex_unlock(&g_transferMapMutex);
+    pthread_mutex_unlock(&g_attachedDevicesMutex);
 
     JNIEnv* env;
     int needs_detach = 0;
@@ -384,6 +437,52 @@ void LIBUSB_CALL generic_transfer_cb(struct libusb_transfer *transfer) {
     if (needs_detach) {
         (*g_jvm)->DetachCurrentThread(g_jvm);
     }
+}
+
+int store_transfer(int fd, int seqNum, struct libusb_transfer* transfer,
+                   int *out_dev_pos, int *out_xfer_pos) {
+    int result = -1;
+    if (out_dev_pos) *out_dev_pos = -1;
+    if (out_xfer_pos) *out_xfer_pos = -1;
+
+    pthread_mutex_lock(&g_attachedDevicesMutex);
+    for (int i = 0; i < MAX_ATTACHED_DEVICES; i++) {
+        if (g_attachedDevices[i].fd == fd) {
+            if (out_dev_pos) *out_dev_pos = i;
+            pthread_mutex_lock(&g_attachedDevices[i].transferMutex);
+
+            for (int j = 0; j < MAX_ASYNC_TRANSFERS_PER_DEVICE; j++) {
+                if (g_attachedDevices[i].activeTransfers[j].seqNum == -1) {
+                    if (out_xfer_pos) *out_xfer_pos = j;
+                    g_attachedDevices[i].activeTransfers[j].seqNum = seqNum;
+                    g_attachedDevices[i].activeTransfers[j].transfer = transfer;
+                    result = 0;
+                    break;
+                }
+            }
+
+            pthread_mutex_unlock(&g_attachedDevices[i].transferMutex);
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_attachedDevicesMutex);
+    return result;
+}
+
+int reset_transfer(int dev_pos, int xfer_pos, int expected_seqNum) {
+    if (dev_pos < 0 || dev_pos >= MAX_ATTACHED_DEVICES ||
+            xfer_pos < 0 || xfer_pos >= MAX_ASYNC_TRANSFERS_PER_DEVICE) {
+        return -1;
+    }
+
+    pthread_mutex_lock(&g_attachedDevices[dev_pos].transferMutex);
+    if (g_attachedDevices[dev_pos].activeTransfers[xfer_pos].seqNum == expected_seqNum) {
+        g_attachedDevices[dev_pos].activeTransfers[xfer_pos].seqNum = -1;
+        g_attachedDevices[dev_pos].activeTransfers[xfer_pos].transfer = NULL;
+    }
+    pthread_mutex_unlock(&g_attachedDevices[dev_pos].transferMutex);
+
+    return 0;
 }
 
 JNIEXPORT jint JNICALL
@@ -475,7 +574,7 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doControlTransferAsyn
     libusb_device_handle *dev_handle = NULL;
     struct libusb_transfer *transfer = NULL;
     unsigned char *native_buffer = NULL;
-    int r;
+    int dev_idx, xfer_idx, r, store_xfer_r;
 
     if (g_ctx == NULL) return -EFAULT;
 
@@ -511,19 +610,8 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doControlTransferAsyn
             (unsigned int)timeout
     );
 
-    int slot = -1;
-    pthread_mutex_lock(&g_transferMapMutex);
-    for (int i = 0; i < MAX_ASYNC_TRANSFERS; i++) {
-        if (g_activeTransfers[i].seqNum == -1) {
-            g_activeTransfers[i].seqNum = seqNum;
-            g_activeTransfers[i].transfer = transfer;
-            slot = i;
-            break;
-        }
-    }
-    pthread_mutex_unlock(&g_transferMapMutex);
-
-    if (slot == -1) {
+    store_xfer_r = store_transfer(fd, seqNum, transfer, &dev_idx, &xfer_idx);
+    if (store_xfer_r == -1) {
         __android_log_print(ANDROID_LOG_ERROR, APPNAME, "AsyncCtrl: No free slots!");
         libusb_free_transfer(transfer);
         return -EBUSY;
@@ -532,12 +620,7 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doControlTransferAsyn
     r = libusb_submit_transfer(transfer);
     if (r < 0) {
         __android_log_print(ANDROID_LOG_ERROR, APPNAME, "AsyncCtrl: libusb_submit_transfer failed: %s", libusb_error_name(r));
-
-        pthread_mutex_lock(&g_transferMapMutex);
-        g_activeTransfers[slot].seqNum = -1;
-        g_activeTransfers[slot].transfer = NULL;
-        pthread_mutex_unlock(&g_transferMapMutex);
-
+        reset_transfer(dev_idx, xfer_idx, seqNum);
         libusb_free_transfer(transfer);
         return libusb_to_errno(r);
     }
@@ -555,7 +638,7 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doBulkTransferAsync(J
     libusb_device_handle *dev_handle = NULL;
     struct libusb_transfer *transfer = NULL;
     unsigned char *native_buffer = NULL;
-    int r;
+    int dev_idx, xfer_idx, r, store_xfer_r;
 
     if (g_ctx == NULL) return -EFAULT;
 
@@ -595,20 +678,9 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doBulkTransferAsync(J
             (unsigned int)timeout
     );
 
-    int slot = -1;
-    pthread_mutex_lock(&g_transferMapMutex);
-    for (int i = 0; i < MAX_ASYNC_TRANSFERS; i++) {
-        if (g_activeTransfers[i].seqNum == -1) {
-            g_activeTransfers[i].seqNum = seqNum;
-            g_activeTransfers[i].transfer = transfer;
-            slot = i;
-            break;
-        }
-    }
-    pthread_mutex_unlock(&g_transferMapMutex);
-
-    if (slot == -1) {
-        __android_log_print(ANDROID_LOG_ERROR, APPNAME, "AsyncBulk: No free slots for active transfer!");
+    store_xfer_r = store_transfer(fd, seqNum, transfer, &dev_idx, &xfer_idx);
+    if (store_xfer_r == -1) {
+        __android_log_print(ANDROID_LOG_ERROR, APPNAME, "AsyncCtrl: No free slots!");
         libusb_free_transfer(transfer);
         return -EBUSY;
     }
@@ -616,12 +688,7 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doBulkTransferAsync(J
     r = libusb_submit_transfer(transfer);
     if (r < 0) {
         __android_log_print(ANDROID_LOG_ERROR, APPNAME, "AsyncBulk: libusb_submit_transfer failed: %s", libusb_error_name(r));
-
-        pthread_mutex_lock(&g_transferMapMutex);
-        g_activeTransfers[slot].seqNum = -1;
-        g_activeTransfers[slot].transfer = NULL;
-        pthread_mutex_unlock(&g_transferMapMutex);
-
+        reset_transfer(dev_idx, xfer_idx, seqNum);
         libusb_free_transfer(transfer);
         return libusb_to_errno(r);
     }
@@ -640,7 +707,7 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doInterruptTransferAs
     libusb_device_handle *dev_handle = NULL;
     struct libusb_transfer *transfer = NULL;
     unsigned char *native_buffer = NULL;
-    int r;
+    int dev_idx, xfer_idx, r, store_xfer_r;
 
     if (g_ctx == NULL) return -EFAULT;
 
@@ -679,20 +746,9 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doInterruptTransferAs
             (unsigned int)timeout
     );
 
-    int slot = -1;
-    pthread_mutex_lock(&g_transferMapMutex);
-    for (int i = 0; i < MAX_ASYNC_TRANSFERS; i++) {
-        if (g_activeTransfers[i].seqNum == -1) {
-            g_activeTransfers[i].seqNum = seqNum;
-            g_activeTransfers[i].transfer = transfer;
-            slot = i;
-            break;
-        }
-    }
-    pthread_mutex_unlock(&g_transferMapMutex);
-
-    if (slot == -1) {
-        __android_log_print(ANDROID_LOG_ERROR, APPNAME, "AsyncIntr: No free slots for active transfer!");
+    store_xfer_r = store_transfer(fd, seqNum, transfer, &dev_idx, &xfer_idx);
+    if (store_xfer_r == -1) {
+        __android_log_print(ANDROID_LOG_ERROR, APPNAME, "AsyncCtrl: No free slots!");
         libusb_free_transfer(transfer);
         return -EBUSY;
     }
@@ -700,12 +756,7 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doInterruptTransferAs
     r = libusb_submit_transfer(transfer);
     if (r < 0) {
         __android_log_print(ANDROID_LOG_ERROR, APPNAME, "AsyncIntr: libusb_submit_transfer failed: %s", libusb_error_name(r));
-
-        pthread_mutex_lock(&g_transferMapMutex);
-        g_activeTransfers[slot].seqNum = -1;
-        g_activeTransfers[slot].transfer = NULL;
-        pthread_mutex_unlock(&g_transferMapMutex);
-
+        reset_transfer(dev_idx, xfer_idx, seqNum);
         libusb_free_transfer(transfer);
         return libusb_to_errno(r);
     }
@@ -724,7 +775,7 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doIsochronousTransfer
     struct libusb_transfer *transfer = NULL;
     unsigned char *native_buffer = NULL;
     jint *native_packet_lengths = NULL;
-    int r;
+    int dev_idx, xfer_idx, r, store_xfer_r;
 
     pthread_mutex_lock(&g_attachedDevicesMutex);
     for (int i = 0; i < MAX_ATTACHED_DEVICES; i++) {
@@ -771,20 +822,9 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doIsochronousTransfer
     }
     (*env)->ReleasePrimitiveArrayCritical(env, iso_packet_lengths, native_packet_lengths, JNI_ABORT);
 
-    int slot = -1;
-    pthread_mutex_lock(&g_transferMapMutex);
-    for (int i = 0; i < MAX_ASYNC_TRANSFERS; i++) {
-        if (g_activeTransfers[i].seqNum == -1) {
-            g_activeTransfers[i].seqNum = seqNum;
-            g_activeTransfers[i].transfer = transfer;
-            slot = i;
-            break;
-        }
-    }
-    pthread_mutex_unlock(&g_transferMapMutex);
-
-    if (slot == -1) {
-        __android_log_print(ANDROID_LOG_ERROR, APPNAME, "AsyncIso: No free slots for active transfer!");
+    store_xfer_r = store_transfer(fd, seqNum, transfer, &dev_idx, &xfer_idx);
+    if (store_xfer_r == -1) {
+        __android_log_print(ANDROID_LOG_ERROR, APPNAME, "AsyncCtrl: No free slots!");
         libusb_free_transfer(transfer);
         return -EBUSY;
     }
@@ -792,12 +832,7 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doIsochronousTransfer
     r = libusb_submit_transfer(transfer);
     if (r < 0) {
         __android_log_print(ANDROID_LOG_ERROR, APPNAME, "AsyncIso: libusb_submit_transfer failed: %s", libusb_error_name(r));
-
-        pthread_mutex_lock(&g_transferMapMutex);
-        g_activeTransfers[slot].seqNum = -1;
-        g_activeTransfers[slot].transfer = NULL;
-        pthread_mutex_unlock(&g_transferMapMutex);
-
+        reset_transfer(dev_idx, xfer_idx, seqNum);
         libusb_free_transfer(transfer);
         return libusb_to_errno(r);
     }
@@ -807,23 +842,32 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doIsochronousTransfer
 
 JNIEXPORT jint JNICALL
 Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_cancelTransfer(JNIEnv *env, jobject thiz,
-                                                                          jint seq_num) {
+                                                                          jint seq_num,
+                                                                          jint fd) {
     struct libusb_transfer *transfer_to_cancel = NULL;
     int r = -1;
 
-    pthread_mutex_lock(&g_transferMapMutex);
-    for (int i = 0; i < MAX_ASYNC_TRANSFERS; i++) {
-        if (g_activeTransfers[i].seqNum == seq_num) {
-            transfer_to_cancel = g_activeTransfers[i].transfer;
+    pthread_mutex_lock(&g_attachedDevicesMutex);
+    for (int i = 0; i < MAX_ATTACHED_DEVICES; i++) {
+        if (g_attachedDevices[i].fd == fd) {
+            pthread_mutex_lock(&g_attachedDevices[i].transferMutex);
+            for (int j = 0; j < MAX_ASYNC_TRANSFERS_PER_DEVICE; j++) {
+                if (g_attachedDevices[i].activeTransfers[j].seqNum == seq_num) {
+                    transfer_to_cancel = g_attachedDevices[i].activeTransfers[j].transfer;
+                    break;
+                }
+            }
+            pthread_mutex_unlock(&g_attachedDevices[i].transferMutex);
             break;
         }
     }
-    pthread_mutex_unlock(&g_transferMapMutex);
+    pthread_mutex_unlock(&g_attachedDevicesMutex);
 
     if (transfer_to_cancel != NULL) {
         r = libusb_cancel_transfer(transfer_to_cancel);
-
         if (r < 0) {
+            if (r == LIBUSB_ERROR_NOT_FOUND) return 0;
+
             __android_log_print(ANDROID_LOG_ERROR, APPNAME,
                                 "Failed to cancel transfer seqNum %d: %s", seq_num, libusb_error_name(r));
             return libusb_to_errno(r);
