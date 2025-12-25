@@ -50,8 +50,10 @@ class UsbIpServer(
 
     private lateinit var serverSocket: ServerSocket
     private lateinit var serverScope: CoroutineScope
+    private var serverShutdown = false
     private val usbLib = UsbLib()
     private val attachedDevices = ConcurrentHashMap<Socket, AttachedDeviceContext>()
+
 
     companion object {
         private const val FLAG_POSSIBLE_SPEED_LOW = 0x01
@@ -76,9 +78,12 @@ class UsbIpServer(
                 handleClientConnection(serverSocket.accept(), this)
             }
         }
+        serverShutdown = false
     }
 
     fun stop() {
+        serverShutdown = true
+
         if (::serverScope.isInitialized) {
             serverScope.cancel()
         }
@@ -172,7 +177,7 @@ class UsbIpServer(
         for (i in 0 until context.device.interfaceCount) {
             context.devConn.releaseInterface(context.device.getInterface(i))
         }
-        usbLib.closeDeviceHandle(context.devConn.fileDescriptor)
+        if(!serverShutdown) usbLib.closeDeviceHandle(context.devConn.fileDescriptor)
         context.devConn.close()
 
         val dev = getDevice(context.device.deviceId)
@@ -526,7 +531,7 @@ class UsbIpServer(
         val pending = context.pendingTransfers.remove(msg.seqNumToUnlink)
         var wasCancelled = false
         if (pending != null) {
-            wasCancelled = usbLib.cancelTransfer(msg.seqNumToUnlink) == 0
+            wasCancelled = usbLib.cancelTransfer(msg.seqNumToUnlink, context.devConn.fileDescriptor) == 0
             context.transferSemaphore.release()
         }
 

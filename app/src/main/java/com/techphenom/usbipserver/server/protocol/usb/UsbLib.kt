@@ -23,7 +23,7 @@ class UsbLib {
     external fun exit()
     external fun openDeviceHandle(fd: Int): Int
     external fun closeDeviceHandle(fd: Int): Int
-    external fun cancelTransfer(seqNum: Int): Int
+    external fun cancelTransfer(seqNum: Int, fd: Int): Int
 
     external fun doControlTransfer(
         fd: Int,
