@@ -21,3 +21,7 @@ fun intToHex(value: Int): String {
     }
     return value.toHexString(format)
 }
+
+fun intToBinary(value: Int): String {
+    return value.toString(2).padStart(8, '0')
+}

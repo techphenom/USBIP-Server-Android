@@ -40,7 +40,8 @@ class UsbLib {
         fd: Int,
         data: ByteBuffer,
         timeout: Int,
-        seqNum: Int
+        seqNum: Int,
+        flags: Int
     ): Int
 
     external fun doBulkTransferAsync(
@@ -48,7 +49,8 @@ class UsbLib {
         endpoint: Int,
         data: ByteBuffer,
         timeout: Int,
-        seqNum: Int
+        seqNum: Int,
+        flags: Int
     ): Int
 
     external fun doInterruptTransferAsync(
@@ -56,7 +58,8 @@ class UsbLib {
         endpoint: Int,
         data: ByteBuffer,
         timeout: Int,
-        seqNum: Int
+        seqNum: Int,
+        flags: Int
     ): Int
 
     external fun doIsochronousTransferAsync(
@@ -64,7 +67,8 @@ class UsbLib {
         endpoint: Int,
         data: ByteBuffer,
         isoPacketLengths: IntArray,
-        seqNum: Int
+        seqNum: Int,
+        flags: Int
     ): Int
 
 }

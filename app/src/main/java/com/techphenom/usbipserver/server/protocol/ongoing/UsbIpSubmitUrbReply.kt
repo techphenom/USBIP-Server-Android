@@ -51,10 +51,11 @@ class UsbIpSubmitUrbReply(seqNum: Int) :
 
     override fun toString(): String {
         val isoPacketDescriptorsString = isoPacketDescriptors.joinToString(separator = "\n", postfix = ",") { it.toString() }
+        val statusString = if (status == 0) "SUCCESS" else "NOT SUCCESSFUL"
         return """
             USBIP_RET_SUBMIT
                 ${super.toString()},
-                Status: $status (0 for successful URB transaction),
+                Status: $status (${statusString}),
                 Actual Length: $actualLength,
                 Start Frame: $startFrame,
                 Number of Packets: $numberOfPackets,

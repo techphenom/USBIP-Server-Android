@@ -3,7 +3,6 @@ package com.techphenom.usbipserver.server
 import android.hardware.usb.UsbConstants.*
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbDeviceConnection
-import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import com.techphenom.usbipserver.UsbIpEvent
@@ -54,12 +53,7 @@ class UsbIpServer(
     private val usbLib = UsbLib()
     private val attachedDevices = ConcurrentHashMap<Socket, AttachedDeviceContext>()
 
-
     companion object {
-        private const val FLAG_POSSIBLE_SPEED_LOW = 0x01
-        private const val FLAG_POSSIBLE_SPEED_FULL = 0x02
-        private const val FLAG_POSSIBLE_SPEED_HIGH = 0x04
-        private const val FLAG_POSSIBLE_SPEED_SUPER = 0x08
         private const val USBIP_PORT = 3240
     }
 
@@ -173,7 +167,6 @@ class UsbIpServer(
         val context: AttachedDeviceContext = attachedDevices[socket] ?: return
         attachedDevices.remove(socket)
 
-        // Release our claim to the interfaces
         for (i in 0 until context.device.interfaceCount) {
             context.devConn.releaseInterface(context.device.getInterface(i))
         }
@@ -271,6 +264,14 @@ class UsbIpServer(
             if (devDesc != null) {
                 ipDev.bcdDevice = devDesc.bcdDevice
             }
+            ipDev.bConfigurationValue = UsbControlHelper.getActiveConfigurationValue(usbLib, context)
+            for (i in 0 until context.device.configurationCount) {
+                val config = context.device.getConfiguration(i)
+                if (config.id == ipDev.bConfigurationValue.toInt()) {
+                    context.activeConfig = config
+                }
+            }
+            UsbControlHelper.buildEndpointCache(context)
         }
 
         ipDev.speed = detectSpeed(device, devDesc)
@@ -279,87 +280,44 @@ class UsbIpServer(
     }
 
     private fun detectSpeed(dev: UsbDevice, devDesc: UsbDeviceDescriptor?): Int {
-        var possibleSpeeds: Int = FLAG_POSSIBLE_SPEED_LOW or FLAG_POSSIBLE_SPEED_FULL or
-                FLAG_POSSIBLE_SPEED_HIGH or FLAG_POSSIBLE_SPEED_SUPER
+        val allEndpoints = (0 until dev.interfaceCount).asSequence()
+            .map { dev.getInterface(it) }
+            .flatMap { i -> (0 until i.endpointCount).map { i.getEndpoint(it) } }
 
-        for (i in 0 until dev.interfaceCount) {
-            val usbInterface = dev.getInterface(i)
-            for (j in 0 until usbInterface.endpointCount) {
-                val endpoint: UsbEndpoint = usbInterface.getEndpoint(j)
-                if (endpoint.type == USB_ENDPOINT_XFER_BULK || endpoint.type == USB_ENDPOINT_XFER_ISOC) {
-                    // Low speed devices can't implement bulk or iso endpoints
-                    possibleSpeeds = possibleSpeeds and FLAG_POSSIBLE_SPEED_LOW.inv()
+        var isSuperSpeed = false
+        var isHighSpeed = false
+
+        for (ep in allEndpoints) {
+            when (ep.type) {
+                USB_ENDPOINT_XFER_BULK -> {
+                    if (ep.maxPacketSize == 1024) isSuperSpeed = true
+                    if (ep.maxPacketSize == 512) isHighSpeed = true
                 }
-                when(endpoint.type) {
-                    USB_ENDPOINT_XFER_CONTROL -> {
-                        if (endpoint.maxPacketSize > 8) {
-                            // Low speed devices can't use control transfer sizes larger than 8 bytes
-                            possibleSpeeds = possibleSpeeds and FLAG_POSSIBLE_SPEED_LOW.inv()
-                        }
-                        if (endpoint.maxPacketSize < 64) {
-                            // High speed devices can't use control transfer sizes smaller than 64 bytes
-                            possibleSpeeds = possibleSpeeds and FLAG_POSSIBLE_SPEED_HIGH.inv()
-                        }
-                        if (endpoint.maxPacketSize < 512) {
-                            // Full speed devices can't use control transfer sizes smaller than 512 bytes
-                            possibleSpeeds = possibleSpeeds and FLAG_POSSIBLE_SPEED_FULL.inv()
-                        }
-                    }
-                    USB_ENDPOINT_XFER_INT -> {
-                        if (endpoint.maxPacketSize > 8) {
-                            // Low speed devices can't use interrupt transfer sizes larger than 8 bytes
-                            possibleSpeeds = possibleSpeeds and FLAG_POSSIBLE_SPEED_LOW.inv()
-                        }
-                        if (endpoint.maxPacketSize > 64) {
-                            // Full speed devices can't use interrupt transfer sizes larger than 64 bytes
-                            possibleSpeeds = possibleSpeeds and FLAG_POSSIBLE_SPEED_FULL.inv()
-                        }
-                        if (endpoint.maxPacketSize > 512) {
-                            // High speed devices can't use interrupt transfer sizes larger than 512 bytes
-                            possibleSpeeds = possibleSpeeds and FLAG_POSSIBLE_SPEED_HIGH.inv()
-                        }
-                    }
-                    USB_ENDPOINT_XFER_BULK -> {
-                        // A bulk endpoint alone can accurately distinguish between full/high/super speed devices
-                        possibleSpeeds = when(endpoint.maxPacketSize) {
-                            512 -> FLAG_POSSIBLE_SPEED_HIGH // High speed devices can only use 512 byte bulk transfers
-                            1024 -> FLAG_POSSIBLE_SPEED_SUPER // Super speed devices can only use 1024 byte bulk transfers
-                            else -> FLAG_POSSIBLE_SPEED_FULL // Otherwise it must be full speed
-                        }
-                    }
-                    USB_ENDPOINT_XFER_ISOC -> {
-                        // If the transfer size is 1024, it must be high speed
-                        if (endpoint.maxPacketSize == 1024) {
-                            possibleSpeeds = FLAG_POSSIBLE_SPEED_HIGH
-                        }
-                    }
+                USB_ENDPOINT_XFER_CONTROL -> {
+                    if (ep.maxPacketSize == 512) isSuperSpeed = true
+                }
+                USB_ENDPOINT_XFER_INT -> {
+                    if (ep.maxPacketSize > 64) isHighSpeed = true
+                }
+                USB_ENDPOINT_XFER_ISOC -> {
+                    if (ep.maxPacketSize > 1023) isHighSpeed = true
                 }
             }
         }
-        if (devDesc != null) {
-            if (devDesc.bcdUSB < 0x200) {
-                // High speed only supported on USB 2.0 or higher
-                possibleSpeeds = possibleSpeeds and FLAG_POSSIBLE_SPEED_HIGH.inv()
-            }
-            if (devDesc.bcdUSB < 0x300) {
-                // Super speed only supported on USB 3.0 or higher
-                possibleSpeeds = possibleSpeeds and FLAG_POSSIBLE_SPEED_SUPER.inv()
-            }
+        if (isSuperSpeed) return UsbIpDeviceConstants.USB_SPEED_SUPER
+        if (isHighSpeed) {
+            return if (devDesc != null && devDesc.bcdUSB >= 0x0300) UsbIpDeviceConstants.USB_SPEED_SUPER
+                else UsbIpDeviceConstants.USB_SPEED_HIGH
         }
-        Logger.i("detectSpeed()","Speed heuristics for device ${dev.deviceId} left us with $possibleSpeeds")
 
-        // Return the lowest speed that we're compatible with
-        return if (possibleSpeeds and FLAG_POSSIBLE_SPEED_LOW != 0) {
-            UsbIpDeviceConstants.USB_SPEED_LOW
-        } else if (possibleSpeeds and FLAG_POSSIBLE_SPEED_FULL != 0) {
-            UsbIpDeviceConstants.USB_SPEED_FULL
-        } else if (possibleSpeeds and FLAG_POSSIBLE_SPEED_HIGH != 0) {
-            UsbIpDeviceConstants.USB_SPEED_HIGH
-        } else if (possibleSpeeds and FLAG_POSSIBLE_SPEED_SUPER != 0) {
-            UsbIpDeviceConstants.USB_SPEED_SUPER
-        } else {
-            UsbIpDeviceConstants.USB_SPEED_UNKNOWN // Something went very wrong
+        val isLowSpeed = allEndpoints.all { ep ->
+            ep.type != USB_ENDPOINT_XFER_BULK &&
+                    ep.type != USB_ENDPOINT_XFER_ISOC &&
+                    ep.maxPacketSize <= 8
         }
+
+        return if (isLowSpeed) UsbIpDeviceConstants.USB_SPEED_LOW
+        else UsbIpDeviceConstants.USB_SPEED_FULL
     }
 
     private fun attachToDevice(s: Socket, busId: String): AttachedDeviceContext? {
@@ -367,19 +325,14 @@ class UsbIpServer(
         if (attachedDevices.get(s) != null) return null // Already attached
         val devConn: UsbDeviceConnection = usbManager.openDevice(dev) ?: return null
 
-        // Claim all interfaces since we don't know which one the client wants
-        for (i in 0 until dev.interfaceCount) {
-            if (!devConn.claimInterface(dev.getInterface(i), true)) {
-                Logger.e("attachToDevice()", "Unable to claim interface " + dev.getInterface(i).id)
-            }
-        }
-
         val attachedDeviceContext = AttachedDeviceContext()
         attachedDeviceContext.devConn = devConn
         attachedDeviceContext.device = dev
 
-        for (i in 0 until dev.interfaceCount) { // Count all endpoints on all interfaces
-            attachedDeviceContext.totalEndpointCount += dev.getInterface(i).endpointCount
+        for (i in 0 until dev.interfaceCount) { // Claim all interfaces
+            if (!devConn.claimInterface(dev.getInterface(i), true)) {
+                Logger.e("attachToDevice()", "Unable to claim interface " + dev.getInterface(i).id)
+            }
         }
 
         usbLib.openDeviceHandle(devConn.fileDescriptor)
@@ -423,11 +376,7 @@ class UsbIpServer(
             inMsg.isoPacketDescriptors[i].length
         }
 
-        if(epType == USB_ENDPOINT_XFER_CONTROL){
-            repeat(AttachedDeviceContext.MAX_CONCURRENT_TRANSFERS) {
-                context.transferSemaphore.acquire()
-            }
-        } else context.transferSemaphore.acquire()
+        context.transferSemaphore.acquire()
 
         var totalBufferLength = inMsg.transferBufferLength
         if(epType == USB_ENDPOINT_XFER_CONTROL) totalBufferLength += CONTROL_SETUP_WIRE_SIZE
@@ -447,7 +396,13 @@ class UsbIpServer(
                 Logger.i("submitUrbRequest","CONTROL: $seqNum - Started")
                 with(inMsg.setup) {
                     if(UsbControlHelper.handleTransferInternally(requestType, request)) {
+                        repeat(AttachedDeviceContext.MAX_CONCURRENT_TRANSFERS -1) {
+                            context.transferSemaphore.acquire()
+                        }
                         UsbControlHelper.doInternalControlTransfer(context, requestType, request, value,index)
+                        repeat(AttachedDeviceContext.MAX_CONCURRENT_TRANSFERS - 1) {
+                            context.transferSemaphore.release()
+                        }
                         onTransferCompleted(inMsg.seqNum, ProtocolCodes.STATUS_OK, 0, LibusbTransferType.CONTROL.code, isoPacketLengths, null)
                         return
                     } else {
@@ -462,7 +417,8 @@ class UsbIpServer(
                             context.devConn.fileDescriptor,
                             transferBuffer.slice(),
                             300,
-                            inMsg.seqNum
+                            inMsg.seqNum,
+                            inMsg.transferFlags.value
                         )
                     }
                 }
@@ -474,7 +430,8 @@ class UsbIpServer(
                     epAddress,
                     transferBuffer.slice(),
                     300,
-                    inMsg.seqNum
+                    inMsg.seqNum,
+                    inMsg.transferFlags.value
                 )
             }
             USB_ENDPOINT_XFER_INT -> {
@@ -483,8 +440,9 @@ class UsbIpServer(
                     context.devConn.fileDescriptor,
                     epAddress,
                     transferBuffer.slice(),
-                    100,
-                    inMsg.seqNum
+                    1000,
+                    inMsg.seqNum,
+                    inMsg.transferFlags.value
                 )
             }
             USB_ENDPOINT_XFER_ISOC -> {
@@ -494,7 +452,8 @@ class UsbIpServer(
                     epAddress,
                     transferBuffer.slice(),
                     isoPacketLengths,
-                    inMsg.seqNum
+                    inMsg.seqNum,
+                    inMsg.transferFlags.value
                 )
             }
             else -> throw IOException("Unsupported endpoint type: $epType, seqNum: $seqNum")
@@ -542,11 +501,8 @@ class UsbIpServer(
                 } else {
                     pending.transferBuffer.position(0) // Ensure buffer at starting position
                 }
-                if(transferType == LibusbTransferType.CONTROL){
-                    repeat(AttachedDeviceContext.MAX_CONCURRENT_TRANSFERS) {
-                        context.transferSemaphore.release()
-                    }
-                } else context.transferSemaphore.release()
+
+                context.transferSemaphore.release()
 
                 with(pending){
                     sendReply(context, request, status, transferBuffer, actualLength, isoPacketActualLengths, isoPacketStatuses)

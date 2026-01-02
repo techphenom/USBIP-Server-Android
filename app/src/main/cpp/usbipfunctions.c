@@ -67,6 +67,19 @@ static int libusb_status_to_errno(int libusb_status) {
     }
 }
 
+static const char * LIBUSB_CALL libusb_status_name(int libusb_status) {
+    switch (libusb_status) {
+        case LIBUSB_TRANSFER_COMPLETED: return "LIBUSB_TRANSFER_COMPLETED";
+        case LIBUSB_TRANSFER_TIMED_OUT: return "LIBUSB_TRANSFER_TIMED_OUT";
+        case LIBUSB_TRANSFER_CANCELLED: return "LIBUSB_TRANSFER_CANCELLED";
+        case LIBUSB_TRANSFER_STALL: return "LIBUSB_TRANSFER_STALL";
+        case LIBUSB_TRANSFER_NO_DEVICE: return "LIBUSB_TRANSFER_NO_DEVICE";
+        case LIBUSB_TRANSFER_OVERFLOW: return "LIBUSB_TRANSFER_OVERFLOW";
+        case LIBUSB_TRANSFER_ERROR: return "LIBUSB_TRANSFER_ERROR";
+        default: return "UNKNOWN_LIBUSB_STATUS";
+    }
+}
+
 JNIEXPORT jint JNICALL
 Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_init(JNIEnv *env, jobject thiz) {
     if (g_ctx != NULL) {
@@ -353,6 +366,12 @@ void LIBUSB_CALL generic_transfer_cb(struct libusb_transfer *transfer) {
     int seqNum = (int)(intptr_t)transfer->user_data;
     int totalActualLength = transfer->actual_length;
     libusb_device_handle *handle = transfer->dev_handle;
+    if (transfer->status != LIBUSB_TRANSFER_COMPLETED &&
+        transfer->status != LIBUSB_TRANSFER_CANCELLED &&
+        transfer->status != LIBUSB_TRANSFER_TIMED_OUT
+        ) {
+        __android_log_print(ANDROID_LOG_ERROR, APPNAME, "%d - transfer failed: %s (code %d)", seqNum, libusb_status_name(transfer->status), transfer->status);
+    }
 
     pthread_mutex_lock(&g_attachedDevicesMutex);
     for (int i = 0; i < MAX_ATTACHED_DEVICES; i++) {
@@ -485,6 +504,19 @@ int reset_transfer(int dev_pos, int xfer_pos, int expected_seqNum) {
     return 0;
 }
 
+static uint8_t map_urb_flags_to_libusb(int usbip_flags) {
+    uint8_t libusb_flags = 0;
+
+    if (usbip_flags & 0x0001) { // Short Not OK (0x0001)
+        libusb_flags |= LIBUSB_TRANSFER_SHORT_NOT_OK;
+    }
+    if (usbip_flags & 0x0040) { // Zero Packet (ZLP) (0x0040)
+        libusb_flags |= LIBUSB_TRANSFER_ADD_ZERO_PACKET;
+    }
+
+    return libusb_flags;
+}
+
 JNIEXPORT jint JNICALL
 Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doControlTransfer(JNIEnv *env,
                                                                            jobject thiz,
@@ -570,7 +602,8 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doControlTransferAsyn
                                                                                   jint fd,
                                                                                   jobject buffer,
                                                                                   jint timeout,
-                                                                                  jint seqNum) {
+                                                                                  jint seqNum,
+                                                                                  jint usbipFlags) {
     libusb_device_handle *dev_handle = NULL;
     struct libusb_transfer *transfer = NULL;
     unsigned char *native_buffer = NULL;
@@ -609,6 +642,7 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doControlTransferAsyn
             (void*)(intptr_t)seqNum,
             (unsigned int)timeout
     );
+    transfer->flags = map_urb_flags_to_libusb(usbipFlags);
 
     store_xfer_r = store_transfer(fd, seqNum, transfer, &dev_idx, &xfer_idx);
     if (store_xfer_r == -1) {
@@ -634,7 +668,8 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doBulkTransferAsync(J
                                                                                jint endpoint,
                                                                                jobject buffer,
                                                                                jint timeout,
-                                                                               jint seqNum) {
+                                                                               jint seqNum,
+                                                                               jint usbipFlags) {
     libusb_device_handle *dev_handle = NULL;
     struct libusb_transfer *transfer = NULL;
     unsigned char *native_buffer = NULL;
@@ -677,6 +712,7 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doBulkTransferAsync(J
             (void*)(intptr_t)seqNum,
             (unsigned int)timeout
     );
+    transfer->flags = map_urb_flags_to_libusb(usbipFlags);
 
     store_xfer_r = store_transfer(fd, seqNum, transfer, &dev_idx, &xfer_idx);
     if (store_xfer_r == -1) {
@@ -703,7 +739,8 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doInterruptTransferAs
                                                                                     jint endpoint,
                                                                                     jobject buffer,
                                                                                     jint timeout,
-                                                                                    jint seqNum) {
+                                                                                    jint seqNum,
+                                                                                    jint usbipFlags) {
     libusb_device_handle *dev_handle = NULL;
     struct libusb_transfer *transfer = NULL;
     unsigned char *native_buffer = NULL;
@@ -745,6 +782,7 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doInterruptTransferAs
             (void*)(intptr_t)seqNum,
             (unsigned int)timeout
     );
+    transfer->flags = map_urb_flags_to_libusb(usbipFlags);
 
     store_xfer_r = store_transfer(fd, seqNum, transfer, &dev_idx, &xfer_idx);
     if (store_xfer_r == -1) {
@@ -770,7 +808,8 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doIsochronousTransfer
                                                                                       jint endpoint,
                                                                                       jobject buffer,
                                                                                       jintArray iso_packet_lengths,
-                                                                                      jint seqNum) {
+                                                                                      jint seqNum,
+                                                                                      jint usbipFlags) {
     libusb_device_handle *dev_handle = NULL;
     struct libusb_transfer *transfer = NULL;
     unsigned char *native_buffer = NULL;
@@ -817,6 +856,7 @@ Java_com_techphenom_usbipserver_server_protocol_usb_UsbLib_doIsochronousTransfer
                              generic_transfer_cb,
                              (void*)(intptr_t)seqNum,
                              1000);
+    transfer->flags = map_urb_flags_to_libusb(usbipFlags);
     for (int i = 0; i < num_packets; i++) {
         transfer->iso_packet_desc[i].length = native_packet_lengths[i];
     }
