@@ -14,23 +14,10 @@ class UsbControlHelper {
         private const val GET_DESCRIPTOR_REQUEST_TYPE = 0x80
         private const val GET_DESCRIPTOR_REQUEST = 0x06
         private const val GET_CONFIGURATION_REQUEST = 0x08
-
-        private const val GET_STATUS_REQUEST_TYPE = 0x82
-        private const val GET_STATUS_REQUEST = 0x00
-
-        private const val CLEAR_FEATURE_REQUEST_TYPE = 0x02
-        private const val CLEAR_FEATURE_REQUEST = 0x01
-
         private const val SET_CONFIGURATION_REQUEST_TYPE: Int = 0x00
         private const val SET_CONFIGURATION_REQUEST: Int = 0x9
-
         private const val SET_INTERFACE_REQUEST_TYPE: Int = 0x01
         private const val SET_INTERFACE_REQUEST: Int = 0xB
-
-        private const val SET_ADDRESS_REQUEST_TYPE: Int = 0x00
-        private const val SET_ADDRESS_REQUEST: Int = 0x05
-
-        private const val FEATURE_VALUE_HALT = 0x00
 
         private const val DEVICE_DESCRIPTOR_TYPE = 1
 
