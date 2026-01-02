@@ -51,9 +51,5 @@ class AttachedDeviceContext {
         val socket: Socket,
         val request: UsbIpSubmitUrb,
         var transferBuffer: ByteBuffer
-    ) {
-        fun updateBuffer(data: ByteBuffer) {
-            transferBuffer = data
-        }
-    }
+    )
 }

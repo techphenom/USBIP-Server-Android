@@ -69,7 +69,7 @@ class UsbIpSubmitUrb(header: ByteArray) : UsbIpBasicPacket(header) {
                 val isoBuff = ByteBuffer.wrap(allIsoDescriptorsBytes).order(ByteOrder.BIG_ENDIAN)
                 val descriptors = ArrayList<UsbIpIsoPacketDescriptor>(msg.numberOfPackets)
 
-                for (i in 0 until msg.numberOfPackets) {
+                repeat(msg.numberOfPackets) {
                     val offset = isoBuff.getInt()
                     val length = isoBuff.getInt()
                     val actualLength = isoBuff.getInt()
@@ -203,7 +203,7 @@ class UsbIpSubmitUrb(header: ByteArray) : UsbIpBasicPacket(header) {
             if (value and USBIP_URB_ZERO_PACKET != 0) flags.add("ZERO_PACKET")
             if (value and USBIP_URB_NO_INTERRUPT != 0) flags.add("NO_INTERRUPT")
             if (value and USBIP_URB_FREE_BUFFER != 0) flags.add("FREE_BUFFER")
-            if (value and USBIP_URB_DIR_IN != 0) flags.add("DIR_IN")
+            if (value and USBIP_URB_DIR_IN != 0) flags.add("DIR_IN") else flags.add("DIR_OUT")
 
             // Kernel internal memory flags (rarely seen but part of the protocol)
             if (value and USBIP_URB_DMA_MAP_SINGLE != 0) flags.add("DMA_MAP_SINGLE")
@@ -225,8 +225,6 @@ class UsbIpSubmitUrb(header: ByteArray) : UsbIpBasicPacket(header) {
             const val USBIP_URB_NO_INTERRUPT = 0x0080
             const val USBIP_URB_FREE_BUFFER = 0x0100
             const val USBIP_URB_DIR_IN = 0x0200
-            const val USBIP_URB_DIR_OUT = 0
-            const val USBIP_URB_DIR_MASK = USBIP_URB_DIR_IN
 
             const val USBIP_URB_DMA_MAP_SINGLE = 0x00010000
             const val USBIP_URB_DMA_MAP_PAGE = 0x00020000
@@ -235,7 +233,6 @@ class UsbIpSubmitUrb(header: ByteArray) : UsbIpBasicPacket(header) {
             const val USBIP_URB_SETUP_MAP_SINGLE = 0x00100000
             const val USBIP_URB_SETUP_MAP_LOCAL = 0x00200000
             const val USBIP_URB_DMA_SG_COMBINED = 0x00400000
-            const val USBIP_URB_ALIGNED_TEMP_BUFFER = 0x00800000
         }
     }
 }
