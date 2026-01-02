@@ -21,7 +21,6 @@ class AttachedDeviceContext {
     var activeConfigEndpointCache: SparseArray<UsbEndpoint>? = null
     val pendingTransfers: MutableMap<Int, PendingTransfer> = ConcurrentHashMap()
     val transferSemaphore = Semaphore(permits = MAX_CONCURRENT_TRANSFERS)
-    var totalEndpointCount: Int = 0
     val replyChannel = Channel<UsbIpBasicPacket>(Channel.UNLIMITED)
     private val bufferPool = ConcurrentLinkedQueue<ByteBuffer>()
 
